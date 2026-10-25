@@ -11,9 +11,8 @@ Invariant: every domain label derives from WIRE_VERSION. Bumping
 WIRE_VERSION invalidates every label in the file simultaneously - a
 signature under an old label must not verify under a new one.
 """
+
 from __future__ import annotations
-
-
 
 # Wire version and derived labels
 
@@ -143,13 +142,36 @@ MAX_PIN_VALUE_BYTES: int = 4096
 
 BLOCK_FIELDS: frozenset[str] = frozenset(
     {
-        "ver", "typ", "cid", "jti", "iss", "holder", "cnf", "sid",
-        "task", "scope", "nbf", "exp", "max_depth", "prev", "model",
+        "ver",
+        "typ",
+        "cid",
+        "jti",
+        "iss",
+        "holder",
+        "cnf",
+        "sid",
+        "task",
+        "scope",
+        "nbf",
+        "exp",
+        "max_depth",
+        "prev",
+        "model",
     }
 )
 POP_FIELDS: frozenset[str] = frozenset(
-    {"ver", "typ", "aud", "ath", "res", "act", "ph", "ts", "nonce", "cb"}
+    {
+        "ver",
+        "typ",
+        "aud",
+        "ath",
+        "res",
+        "act",
+        "ph",
+        "ts",
+        "nonce",
+        "cb",
+    }
 )
 ENROLL_FIELDS: frozenset[str] = frozenset({"ver", "typ", "aud", "cb", "ts"})
-SCOPE_FIELDS: frozenset[str] = frozenset(
-    {"tools", "budget", "domains", "audience"})
+SCOPE_FIELDS: frozenset[str] = frozenset({"tools", "budget", "domains", "audience"})

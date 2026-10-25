@@ -1,29 +1,40 @@
 """Proof of possession and enrollment envelopes."""
+
 from __future__ import annotations
 
 import hmac
 import secrets
-from typing import Optional
 
-from . import _canonical as  canonical
-from ._errors import Code, Reject
-from ._keys import BaseWorkloadKey, thumbprint, verify_signature
-from ._wire import  Signed,  is_int
+from . import _canonical as canonical
 from ._constants import (
     CTX_ENROLL,
     CTX_POP,
     ENROLL_FIELDS,
+    EXPORTER_LENGTH,
     MAX_AGENT_ID_CHARS,
     MAX_NONCE_CHARS,
+    MIN_NONCE_CHARS,
     POP_FIELDS,
     WIRE_VERSION,
-    EXPORTER_LENGTH,
-    MIN_NONCE_CHARS,
 )
+from ._errors import Code
+from ._errors import RejectError as Reject
+from ._keys import (
+    BaseWorkloadKey,
+    thumbprint,
+    verify_signature,
+)
+from ._wire import Signed, is_int
 
-def _require_channel_binding(value: object) -> bytes:
+
+def _require_channel_binding(
+    value: object,
+) -> bytes:
     if not isinstance(value, (bytes, bytearray)) or len(value) != EXPORTER_LENGTH:
-        raise Reject(Code.CB_MISMATCH, "channel binding required")
+        raise Reject(
+            Code.CB_MISMATCH,
+            "channel binding required",
+        )
     return bytes(value)
 
 
@@ -37,14 +48,18 @@ def _check_timestamp(value: object, now: int, max_skew: int) -> None:
     if not is_int(value):
         raise Reject(Code.POP_MALFORMED, "ts")
     if abs(now - value) > max_skew:
-        raise Reject(Code.POP_STALE, f"ts={value} now={now}")
+        raise Reject(
+            Code.POP_STALE,
+            f"ts={value} now={now}",
+        )
 
 
 def _check_channel_binding(body: dict, expected: object) -> None:
     binding = _require_channel_binding(expected)
     presented = body.get("cb")
     if not isinstance(presented, str) or not hmac.compare_digest(
-        presented.encode("ascii", "replace"), canonical.b64e(binding).encode("ascii")
+        presented.encode("ascii", "replace"),
+        canonical.b64e(binding).encode("ascii"),
     ):
         raise Reject(Code.CB_MISMATCH, "exporter mismatch")
 
@@ -59,10 +74,14 @@ def make_proof_of_possession(
     body: bytes,
     channel_binding: bytes,
     now: int,
-    nonce: Optional[str] = None,
+    nonce: str | None = None,
 ) -> bytes:
     """Sign a single-use proof binding this request to this TLS connection."""
-    _require_text(verifier_id, "verifier_id", MAX_AGENT_ID_CHARS)
+    _require_text(
+        verifier_id,
+        "verifier_id",
+        MAX_AGENT_ID_CHARS,
+    )
     _require_text(resource, "resource", 128)
     _require_text(action, "action", 128)
     if nonce is not None and not (
@@ -85,7 +104,11 @@ def make_proof_of_possession(
             "cb": canonical.b64e(binding),
         }
     )
-    return Signed(raw, key.sign(CTX_POP, raw), key.public_key).encode()
+    return Signed(
+        raw,
+        key.sign(CTX_POP, raw),
+        key.public_key,
+    ).encode()
 
 
 def verify_proof_of_possession(
@@ -103,7 +126,10 @@ def verify_proof_of_possession(
 ) -> str:
     """Verify a proof and return its nonce for single-use consumption."""
     if thumbprint(envelope.public_key) != cnf:
-        raise Reject(Code.POP_MISMATCH, "proof key is not the token cnf")
+        raise Reject(
+            Code.POP_MISMATCH,
+            "proof key is not the token cnf",
+        )
 
     verify_signature(
         envelope.public_key,
@@ -161,7 +187,11 @@ def make_enrollment(
             "ts": now,
         }
     )
-    return Signed(raw, key.sign(CTX_ENROLL, raw), key.public_key).encode()
+    return Signed(
+        raw,
+        key.sign(CTX_ENROLL, raw),
+        key.public_key,
+    ).encode()
 
 
 def verify_enrollment(
@@ -195,7 +225,10 @@ def verify_enrollment(
         or body["typ"] != "enroll"
         or body["aud"] != issuer_id
     ):
-        raise Reject(Code.POP_BINDING, "enroll shape/ver/typ/aud")
+        raise Reject(
+            Code.POP_BINDING,
+            "enroll shape/ver/typ/aud",
+        )
 
     _check_timestamp(body["ts"], now, max_skew)
     _check_channel_binding(body, channel_binding)

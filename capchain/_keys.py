@@ -1,41 +1,44 @@
 """Workload keys and the root trust anchor."""
 
-
 from __future__ import annotations
-from pathlib import Path
-import os
 
+import contextlib
 import hashlib
 import hmac
+import os
 from collections.abc import Iterable, Mapping
-from typing import Optional
+from pathlib import Path
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives import serialization
+from cryptography.exceptions import (
+    InvalidSignature,
+)
+from cryptography.hazmat.primitives import (
+    serialization,
+)
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
 
 from ._canonical import b64e
-from ._errors import Reject
 from ._constants import (
-    PUBLIC_KEY_BYTES,
+    HEX,
     PRIVATE_SEED_BYTES,
+    PUBLIC_KEY_BYTES,
     THUMBPRINT_HEX_CHARS,
-    HEX
 )
-
-
-SIGNATURE_BYTES: int = 64
-PUBLIC_KEY_BYTES: int = 32
+from ._errors import RejectError as Reject
 
 
 def save_raw(path: Path, data: bytes, mode: int) -> None:
     """Write `data` to `path` atomically with the given mode."""
     path.parent.mkdir(parents=True, exist_ok=True)
     import tempfile
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+
+    fd, tmp = tempfile.mkstemp(
+        dir=str(path.parent),
+        prefix=f".{path.name}.",
+    )
     try:
         if hasattr(os, "fchmod"):
             os.fchmod(fd, mode)
@@ -55,10 +58,8 @@ def save_raw(path: Path, data: bytes, mode: int) -> None:
         except OSError:
             pass
     except Exception:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 
@@ -92,6 +93,7 @@ def is_thumbprint(value: object) -> bool:
         and all(c in HEX for c in value)
     )
 
+
 def domain_separate(context: str | bytes, message: bytes) -> bytes:
     if isinstance(context, str):
         context = context.encode("ascii")
@@ -109,10 +111,12 @@ def verify_signature(
     """Verify an Ed25519 signature under a domain-separation context."""
     try:
         Ed25519PublicKey.from_public_bytes(public_key).verify(
-            signature, domain_separate(context, message)
+            signature,
+            domain_separate(context, message),
         )
     except (InvalidSignature, ValueError):
         raise Reject(code, detail) from None
+
 
 class BaseWorkloadKey:
     """An Ed25519 key belonging to one workload.
@@ -122,35 +126,48 @@ class BaseWorkloadKey:
     binding that matters is `thumbprint == parent block's cnf`.
     """
 
-    __slots__ = ("_private", "_public", "_thumbprint", "agent_id")
+    __slots__ = (
+        "_private",
+        "_public",
+        "_thumbprint",
+        "agent_id",
+    )
 
     def __init__(
         self,
         private_key: Ed25519PrivateKey,
         *,
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
     ) -> None:
         self._private = private_key
         self._public = private_key.public_key().public_bytes(
-            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
         )
         self._thumbprint = thumbprint(self._public)
         self.agent_id = agent_id
 
     @classmethod
-    def generate(cls, *, agent_id: Optional[str] = None) -> "BaseWorkloadKey":
-        return cls(Ed25519PrivateKey.generate(), agent_id=agent_id)
+    def generate(cls, *, agent_id: str | None = None) -> BaseWorkloadKey:
+        return cls(
+            Ed25519PrivateKey.generate(),
+            agent_id=agent_id,
+        )
 
     @classmethod
     def from_seed(
-        cls, seed: bytes, *, agent_id: Optional[str] = None
-    ) -> "BaseWorkloadKey":
+        cls,
+        seed: bytes,
+        *,
+        agent_id: str | None = None,
+    ) -> BaseWorkloadKey:
         if not isinstance(seed, bytes) or len(seed) != PRIVATE_SEED_BYTES:
             raise ValueError(f"seed must be {PRIVATE_SEED_BYTES} bytes")
-        return cls(Ed25519PrivateKey.from_private_bytes(seed), agent_id=agent_id)
+        return cls(
+            Ed25519PrivateKey.from_private_bytes(seed),
+            agent_id=agent_id,
+        )
 
-    
-    
     @property
     def public_key(self) -> bytes:
         return self._public
@@ -168,7 +185,6 @@ class BaseWorkloadKey:
         return f"WorkloadKey(agent_id={self.agent_id!r}, thumbprint={self._thumbprint[:16]}...)"
 
 
-
 class TrustedRoots:
     """Root issuer IDs mapped to their raw Ed25519 public keys.
 
@@ -178,15 +194,17 @@ class TrustedRoots:
 
     __slots__ = ("_by_thumbprint",)
 
-    def __init__(self, issuers: Mapping[str, bytes | Iterable[bytes]]) -> None:
+    def __init__(
+        self,
+        issuers: Mapping[str, bytes | Iterable[bytes]],
+    ) -> None:
         self._by_thumbprint: dict[str, tuple[str, bytes]] = {}
 
         for issuer_id, keys in issuers.items():
             if not isinstance(issuer_id, str) or not issuer_id:
                 raise ValueError("issuer ID must be a non-empty string")
 
-            key_list = [keys] if isinstance(
-                keys, (bytes, bytearray)) else list(keys)
+            key_list = [keys] if isinstance(keys, (bytes, bytearray)) else list(keys)
             if not key_list:
                 raise ValueError(f"{issuer_id}: at least one key required")
 
@@ -195,27 +213,30 @@ class TrustedRoots:
                     raise ValueError(f"{issuer_id}: keys must be raw bytes")
                 raw = bytes(key)
                 if len(raw) != PUBLIC_KEY_BYTES:
-                    raise ValueError(
-                        f"{issuer_id}: key must be {PUBLIC_KEY_BYTES} bytes")
+                    raise ValueError(f"{issuer_id}: key must be {PUBLIC_KEY_BYTES} bytes")
                 kid = thumbprint(raw)
                 existing = self._by_thumbprint.get(kid)
                 if existing is not None and existing[0] != issuer_id:
-                    raise ValueError(
-                        f"key bound to both {existing[0]} and {issuer_id}"
-                    )
-                self._by_thumbprint[kid] = (issuer_id, raw)
+                    raise ValueError(f"key bound to both {existing[0]} and {issuer_id}")
+                self._by_thumbprint[kid] = (
+                    issuer_id,
+                    raw,
+                )
 
-    def issuer_for(self, public_key: bytes) -> Optional[str]:
+    def issuer_for(self, public_key: bytes) -> str | None:
         entry = self._by_thumbprint.get(thumbprint(public_key))
         if entry is None or not hmac.compare_digest(entry[1], public_key):
             return None
         return entry[0]
 
-    def as_wire_config(self) -> dict[str, list[str]]:
+    def as_wire_config(
+        self,
+    ) -> dict[str, list[str]]:
         """Base64 view, for writing config files or logs."""
         out: dict[str, list[str]] = {}
-        for issuer_id, raw in self._by_thumbprint.values():
+        for (
+            issuer_id,
+            raw,
+        ) in self._by_thumbprint.values():
             out.setdefault(issuer_id, []).append(b64e(raw))
         return out
-
-

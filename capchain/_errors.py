@@ -1,8 +1,9 @@
 """Error codes and the single exception type raised by this package."""
+
 from __future__ import annotations
 
-from typing import Optional
 from enum import StrEnum
+
 MAX_DETAIL_CHARS = 512
 
 
@@ -62,7 +63,7 @@ def _printable(text: str) -> str:
     return "".join(c if 0x20 <= ord(c) < 0x7F else "?" for c in text)
 
 
-class Reject(Exception):
+class RejectError(Exception):
     """Raised for every authorization or protocol failure.
 
     `code` is stable and safe to branch on. `detail` is sanitized ASCII
@@ -76,7 +77,7 @@ class Reject(Exception):
         code: Code,
         detail: str = "",
         *,
-        cause: Optional[BaseException] = None,
+        cause: BaseException | None = None,
     ) -> None:
         super().__init__(f"{code}: {detail}" if detail else code)
         self.code = code

@@ -1,19 +1,21 @@
-
 """Capability scope and the two presentation models."""
+
 from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from ._errors import Code, Reject
+
 from ._constants import (
     ANY,
+    MAX_AUDIENCE,
+    MAX_DOMAINS,
     MAX_INT,
+    MAX_STRING_CHARS,
     MAX_TOOLS,
     SCOPE_FIELDS,
-    MAX_AUDIENCE,
-    MAX_STRING_CHARS,
-    MAX_DOMAINS,
 )
+from ._errors import Code
+from ._errors import RejectError as Reject
 
 
 class Model:
@@ -31,8 +33,7 @@ MODELS = frozenset({Model.PEER_BOUND, Model.KEY_BOUND})
 
 def _normalize(name: str, values: Iterable[str], limit: int) -> frozenset[str]:
     if isinstance(values, (str, bytes)):
-        raise ValueError(
-            f"{name} must be a collection of strings, not a string")
+        raise ValueError(f"{name} must be a collection of strings, not a string")
     result = frozenset(values)
     for item in result:
         if not isinstance(item, str) or not item or len(item) > MAX_STRING_CHARS:
@@ -62,14 +63,28 @@ class Scope:
     domains: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "tools", _normalize(
-            "tools", self.tools, MAX_TOOLS))
         object.__setattr__(
-            self, "audience", _normalize(
-                "audience", self.audience, MAX_AUDIENCE)
+            self,
+            "tools",
+            _normalize("tools", self.tools, MAX_TOOLS),
         )
         object.__setattr__(
-            self, "domains", _normalize("domains", self.domains, MAX_DOMAINS)
+            self,
+            "audience",
+            _normalize(
+                "audience",
+                self.audience,
+                MAX_AUDIENCE,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "domains",
+            _normalize(
+                "domains",
+                self.domains,
+                MAX_DOMAINS,
+            ),
         )
         if not self.audience:
             raise ValueError("audience must not be empty")
@@ -77,6 +92,7 @@ class Scope:
             raise ValueError("budget_micros must be a non-negative int")
         if self.budget_micros > MAX_INT:
             raise ValueError(f"budget_micros must be <= {MAX_INT}")
+
     def allows_tool(self, tool: str) -> bool:
         return ANY in self.tools or tool in self.tools
 
@@ -86,16 +102,14 @@ class Scope:
     def allows_domain(self, host: str) -> bool:
         return ANY in self.domains or host in self.domains
 
-    def is_subset_of(self, parent: "Scope") -> bool:
+    def is_subset_of(self, parent: Scope) -> bool:
         if ANY not in parent.tools and not self.tools <= parent.tools:
             return False
         if self.budget_micros > parent.budget_micros:
             return False
         if ANY not in parent.domains and not self.domains <= parent.domains:
             return False
-        if ANY not in parent.audience and not self.audience <= parent.audience:
-            return False
-        return True
+        return not (ANY not in parent.audience and not self.audience <= parent.audience)
 
     def to_body(self) -> dict:
         return {
@@ -106,25 +120,38 @@ class Scope:
         }
 
     @staticmethod
-    def from_body(body: object) -> "Scope":
+    def from_body(body: object) -> Scope:
         if not isinstance(body, dict) or set(body) != SCOPE_FIELDS:
-            raise Reject(Code.TOKEN_MALFORMED, "scope shape")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                "scope shape",
+            )
 
         sets: dict[str, frozenset[str]] = {}
-        for name in ("tools", "domains", "audience"):
+        for name in (
+            "tools",
+            "domains",
+            "audience",
+        ):
             values = body[name]
-            if not isinstance(values, list) or not all(
-                isinstance(v, str) for v in values
-            ):
-                raise Reject(Code.TOKEN_MALFORMED, f"scope.{name}")
+            if not isinstance(values, list) or not all(isinstance(v, str) for v in values):
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    f"scope.{name}",
+                )
             if values != sorted(set(values)):
-                raise Reject(Code.TOKEN_MALFORMED,
-                             f"scope.{name} not sorted/unique")
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    f"scope.{name} not sorted/unique",
+                )
             sets[name] = frozenset(values)
 
         budget = body["budget"]
         if type(budget) is not int:
-            raise Reject(Code.TOKEN_MALFORMED, "scope.budget")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                "scope.budget",
+            )
 
         try:
             return Scope(

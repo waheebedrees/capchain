@@ -1,20 +1,25 @@
 """Issuer role: enroll workload keys, then mint tokens for them."""
+
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 from ._chain import mint
-from ._errors import Code, Reject
+from ._errors import Code
+from ._errors import RejectError as Reject
 from ._keys import BaseWorkloadKey
 from ._proofs import verify_enrollment
 from ._scope import MODELS, Model, Scope
-from ._storage import EnrollmentStore, InMemoryEnrollments
+from ._storage import (
+    EnrollmentStore,
+    InMemoryEnrollments,
+)
 from ._tls import TlsAdapter
 
 
-def _now(clock: Callable[[], int], override: Optional[int]) -> int:
+def _now(clock: Callable[[], int], override: int | None) -> int:
     if override is None:
         return clock()
     if type(override) is not int or override < 0:
@@ -47,15 +52,17 @@ class TokenIssuer:
         agent_id: str,
         root_key: BaseWorkloadKey,
         tls: TlsAdapter,
-        enrollments: Optional[EnrollmentStore] = None,
+        enrollments: EnrollmentStore | None = None,
         enrollment_max_skew: int = 30,
         clock: Callable[[], int] = lambda: int(time.time()),
     ) -> None:
         if not isinstance(agent_id, str) or not agent_id:
             raise ValueError("agent_id must be a non-empty string")
-        if root_key.agent_id not in (None, agent_id):
-            raise ValueError(
-                "root key agent_id does not match issuer agent_id")
+        if root_key.agent_id not in (
+            None,
+            agent_id,
+        ):
+            raise ValueError("root key agent_id does not match issuer agent_id")
         if type(enrollment_max_skew) is not int or enrollment_max_skew < 0:
             raise ValueError(
                 "enrollment_max_skew must be a non-negative int "
@@ -74,7 +81,7 @@ class TokenIssuer:
         *,
         tls_socket: object,
         proof: bytes,
-        now: Optional[int] = None,
+        now: int | None = None,
     ) -> EnrolledKey:
         """Bind the proved key to the TLS peer identity on this connection."""
         timestamp = _now(self._clock, now)
@@ -95,10 +102,14 @@ class TokenIssuer:
             raise
         except Exception as exc:
             raise Reject(
-                Code.STATE_UNAVAILABLE, f"enrollment store: {type(exc).__name__}"
+                Code.STATE_UNAVAILABLE,
+                f"enrollment store: {type(exc).__name__}",
             ) from exc
 
-        return EnrolledKey(holder=peer_id, key_thumbprint=key_thumbprint)
+        return EnrolledKey(
+            holder=peer_id,
+            key_thumbprint=key_thumbprint,
+        )
 
     def issue(
         self,
@@ -110,7 +121,7 @@ class TokenIssuer:
         ttl_seconds: int,
         model: str = Model.KEY_BOUND,
         max_depth: int = 1,
-        now: Optional[int] = None,
+        now: int | None = None,
     ) -> bytes:
         """Mint a token. Enrollment expiry does not revoke issued tokens;
         use the revocation store and keep TTLs short."""
@@ -123,13 +134,16 @@ class TokenIssuer:
 
         try:
             self._enrollments.require(
-                enrolled_key.holder, enrolled_key.key_thumbprint, timestamp
+                enrolled_key.holder,
+                enrolled_key.key_thumbprint,
+                timestamp,
             )
         except Reject:
             raise
         except Exception as exc:
             raise Reject(
-                Code.STATE_UNAVAILABLE, f"enrollment store: {type(exc).__name__}"
+                Code.STATE_UNAVAILABLE,
+                f"enrollment store: {type(exc).__name__}",
             ) from exc
 
         return mint(

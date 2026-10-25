@@ -1,41 +1,42 @@
 """Minting, attenuation, and chain verification."""
+
 from __future__ import annotations
 
 import hmac
 import secrets
 from dataclasses import dataclass
-from typing import Optional
 
-from ._errors import Code, Reject
-from ._keys import TrustedRoots, BaseWorkloadKey, is_thumbprint, thumbprint, verify_signature
+from ._constants import (
+    BLOCK_FIELDS,
+    CTX_BLOCK,
+    GENESIS_LINK,
+    MAX_AGENT_ID_CHARS,
+    MAX_BLOCKS,
+    MAX_CID_CHARS,
+    MAX_JTI_CHARS,
+    MAX_SESSION_ID_CHARS,
+    MAX_TASK_CHARS,
+    WIRE_VERSION,
+    BudgetPath,
+)
+from ._errors import Code
+from ._errors import RejectError as Reject
+from ._keys import (
+    BaseWorkloadKey,
+    TrustedRoots,
+    is_thumbprint,
+    thumbprint,
+    verify_signature,
+)
 from ._scope import MODELS, Scope
 from ._wire import (
     Token,
     bounded_str,
+    derive_jti,
     is_int,
     link_hash,
     sign_block,
-    derive_jti
 )
-
-from ._constants import (
-    SIGNATURE_BYTES,
-    LINK_LABEL,
-    MAX_BLOCKS,
-    MAX_TOKEN_BYTES,
-    BLOCK_FIELDS,
-    MAX_CID_CHARS,
-    MAX_JTI_CHARS,
-    BudgetPath,
-    MAX_SESSION_ID_CHARS,
-    MAX_TASK_CHARS,
-    GENESIS_LINK,
-    WIRE_VERSION,
-    CTX_BLOCK,
-    MAX_ENVELOPE_BYTES,
-    MAX_AGENT_ID_CHARS,   
-)
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,15 +151,27 @@ def attenuate(
     # error must be a Reject, not a TypeError.
     for name in ("max_depth", "nbf", "exp"):
         if not is_int(body[name]):
-            raise Reject(Code.TOKEN_MALFORMED, f"parent leaf {name}")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                f"parent leaf {name}",
+            )
 
     if key.thumbprint != body["cnf"]:
-        raise Reject(Code.HOLDER_MISMATCH, "signing key is not the leaf cnf")
+        raise Reject(
+            Code.HOLDER_MISMATCH,
+            "signing key is not the leaf cnf",
+        )
 
     if set(body) != BLOCK_FIELDS:
-        raise Reject(Code.TOKEN_MALFORMED, "parent leaf field set")
+        raise Reject(
+            Code.TOKEN_MALFORMED,
+            "parent leaf field set",
+        )
     if key.thumbprint != body["cnf"]:
-        raise Reject(Code.HOLDER_MISMATCH, "signing key is not the leaf cnf")
+        raise Reject(
+            Code.HOLDER_MISMATCH,
+            "signing key is not the leaf cnf",
+        )
     if key.agent_id is not None and key.agent_id != body["holder"]:
         raise Reject(
             Code.HOLDER_MISMATCH,
@@ -167,18 +180,24 @@ def attenuate(
     if len(parent.blocks) > body["max_depth"]:
         raise Reject(Code.TOO_DEEP, "max_depth reached")
     if not scope.is_subset_of(Scope.from_body(body["scope"])):
-        raise Reject(Code.SCOPE_WIDENED, "child scope exceeds parent")
+        raise Reject(
+            Code.SCOPE_WIDENED,
+            "child scope exceeds parent",
+        )
 
     expires_at = min(body["exp"], now + ttl_seconds)
     if expires_at <= now:
-        raise Reject(Code.TOKEN_EXPIRED, "parent already expired")
+        raise Reject(
+            Code.TOKEN_EXPIRED,
+            "parent already expired",
+        )
 
     prev = link_hash(leaf)
     jti = derive_jti(prev, body["holder"], scope)
 
     return Token(
-        parent.blocks
-        + (
+        (
+            *parent.blocks,
             sign_block(
                 key,
                 {
@@ -222,10 +241,12 @@ def verify_chain(
     depth = len(token.blocks) - 1
     if depth > max_depth:
         raise Reject(
-            Code.TOO_DEEP, f"depth {depth} exceeds policy {max_depth}")
-    previous: Optional[dict] = None
-    previous_scope: Optional[Scope] = None
-    root_scope: Optional[Scope] = None
+            Code.TOO_DEEP,
+            f"depth {depth} exceeds policy {max_depth}",
+        )
+    previous: dict | None = None
+    previous_scope: Scope | None = None
+    root_scope: Scope | None = None
     previous_link = GENESIS_LINK
     previous_nbf = previous_exp = 0
 
@@ -236,7 +257,6 @@ def verify_chain(
     model = cid = session_id = task = ""
 
     for index, block in enumerate(token.blocks):
-
         # Authenticate before interpreting anything in the body.
         verify_signature(
             block.signer_public_key,
@@ -248,13 +268,25 @@ def verify_chain(
         )
         body = block.body()
         if set(body) != BLOCK_FIELDS:
-            raise Reject(Code.TOKEN_MALFORMED, f"block {index} field set")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                f"block {index} field set",
+            )
         if not is_int(body["ver"]):
-            raise Reject(Code.TOKEN_MALFORMED, f"block {index} ver type")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                f"block {index} ver type",
+            )
         if body["ver"] != WIRE_VERSION:
-            raise Reject(Code.VERSION_UNSUPPORTED, f"block {index}")
+            raise Reject(
+                Code.VERSION_UNSUPPORTED,
+                f"block {index}",
+            )
         if body["prev"] != previous_link:
-            raise Reject(Code.CHAIN_BROKEN, f"block {index}")
+            raise Reject(
+                Code.CHAIN_BROKEN,
+                f"block {index}",
+            )
 
         issuer = body["iss"]
         holder = body["holder"]
@@ -266,76 +298,140 @@ def verify_chain(
             and bounded_str(jti, MAX_JTI_CHARS)
             and is_thumbprint(cnf)
         ):
-            raise Reject(Code.TOKEN_MALFORMED, f"block {index} fields")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                f"block {index} fields",
+            )
 
         if index == 0:
             if body["typ"] != "authority":
-                raise Reject(Code.TOKEN_MALFORMED, "block 0 typ")
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    "block 0 typ",
+                )
             if roots.issuer_for(block.signer_public_key) != issuer:
-                raise Reject(Code.UNKNOWN_ISSUER,
-                             f"root key not bound to {issuer}")
+                raise Reject(
+                    Code.UNKNOWN_ISSUER,
+                    f"root key not bound to {issuer}",
+                )
 
             model = body["model"]
             if model not in MODELS:
-                raise Reject(Code.MODEL_MISMATCH, f"block 0 model {model!r}")
+                raise Reject(
+                    Code.MODEL_MISMATCH,
+                    f"block 0 model {model!r}",
+                )
 
-            cid, session_id, task = body["cid"], body["sid"], body["task"]
+            cid, session_id, task = (
+                body["cid"],
+                body["sid"],
+                body["task"],
+            )
             if not (
                 bounded_str(cid, MAX_CID_CHARS)
-                and bounded_str(session_id, MAX_SESSION_ID_CHARS)
+                and bounded_str(
+                    session_id,
+                    MAX_SESSION_ID_CHARS,
+                )
                 and bounded_str(task, MAX_TASK_CHARS)
             ):
-                raise Reject(Code.TOKEN_MALFORMED, "block 0 context")
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    "block 0 context",
+                )
 
             declared_depth = body["max_depth"]
             if not is_int(declared_depth) or not 0 <= declared_depth < MAX_BLOCKS:
-                raise Reject(Code.TOKEN_MALFORMED, "max_depth")
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    "max_depth",
+                )
             if depth > declared_depth:
-                raise Reject(Code.TOO_DEEP, f"{depth} > {declared_depth}")
+                raise Reject(
+                    Code.TOO_DEEP,
+                    f"{depth} > {declared_depth}",
+                )
 
             path.append(issuer)
         else:
             assert previous is not None
             if body["typ"] != "delegation":
-                raise Reject(Code.TOKEN_MALFORMED, f"block {index} typ")
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    f"block {index} typ",
+                )
             if thumbprint(block.signer_public_key) != previous["cnf"]:
-                raise Reject(Code.HOLDER_MISMATCH,
-                             f"block {index} signer != prev cnf")
+                raise Reject(
+                    Code.HOLDER_MISMATCH,
+                    f"block {index} signer != prev cnf",
+                )
             if issuer != previous["holder"]:
-                raise Reject(Code.HOLDER_MISMATCH,
-                             f"block {index} iss != prev holder")
+                raise Reject(
+                    Code.HOLDER_MISMATCH,
+                    f"block {index} iss != prev holder",
+                )
             if body["model"] != model:
-                raise Reject(Code.CONTEXT_DRIFT, f"block {index} model")
+                raise Reject(
+                    Code.CONTEXT_DRIFT,
+                    f"block {index} model",
+                )
             if not is_int(body["max_depth"]) or (
                 body["cid"],
                 body["sid"],
                 body["task"],
                 body["max_depth"],
-            ) != (cid, session_id, task, previous["max_depth"]):
-                raise Reject(Code.CONTEXT_DRIFT, f"block {index}")
+            ) != (
+                cid,
+                session_id,
+                task,
+                previous["max_depth"],
+            ):
+                raise Reject(
+                    Code.CONTEXT_DRIFT,
+                    f"block {index}",
+                )
 
         if holder != path[-1]:
             path.append(holder)
         scope = Scope.from_body(body["scope"])
         if previous_scope is not None and not scope.is_subset_of(previous_scope):
-            raise Reject(Code.SCOPE_WIDENED, f"block {index}")
+            raise Reject(
+                Code.SCOPE_WIDENED,
+                f"block {index}",
+            )
         if index == 0:
             if jti != cid:
-                raise Reject(Code.TOKEN_MALFORMED, "block 0 jti != cid")
+                raise Reject(
+                    Code.TOKEN_MALFORMED,
+                    "block 0 jti != cid",
+                )
             root_scope = scope
         else:
             if not hmac.compare_digest(
-                jti, derive_jti(previous_link, issuer, scope)
+                jti,
+                derive_jti(previous_link, issuer, scope),
             ):
-                raise Reject(Code.CHAIN_BROKEN, f"block {index} jti")
+                raise Reject(
+                    Code.CHAIN_BROKEN,
+                    f"block {index} jti",
+                )
 
         nbf, exp = body["nbf"], body["exp"]
         if not (is_int(nbf) and is_int(exp)) or nbf < 0 or exp <= nbf:
-            raise Reject(Code.TOKEN_MALFORMED, f"block {index} time")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                f"block {index} time",
+            )
         if index > 0 and (nbf < previous_nbf or exp > previous_exp):
-            raise Reject(Code.CONTEXT_DRIFT, f"block {index} time widened")
+            raise Reject(
+                Code.CONTEXT_DRIFT,
+                f"block {index} time widened",
+            )
         if jti in jtis:
-            raise Reject(Code.TOKEN_MALFORMED, f"block {index} duplicate jti")
+            raise Reject(
+                Code.TOKEN_MALFORMED,
+                f"block {index} duplicate jti",
+            )
         if now + skew < nbf:
             raise Reject(
                 Code.TOKEN_NOT_YET_VALID,
@@ -351,7 +447,11 @@ def verify_chain(
         kids.append(thumbprint(block.signer_public_key))
         budget_path.append((jti, scope.budget_micros))
 
-        previous, previous_scope, previous_link = body, scope, link_hash(block)
+        (
+            previous,
+            previous_scope,
+            previous_link,
+        ) = body, scope, link_hash(block)
         previous_nbf, previous_exp = nbf, exp
 
     assert previous is not None and previous_scope is not None and root_scope is not None

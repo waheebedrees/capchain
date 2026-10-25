@@ -1,13 +1,11 @@
 """Hash-chained audit records."""
+
 from __future__ import annotations
 
 import hashlib
-import threading
 from dataclasses import dataclass
-from typing import Protocol
 
 from . import _canonical as canonical
-from ._constants import GENESIS_HASH
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +58,3 @@ class Evidence:
                 }
             )
         ).hexdigest()
-
-
-

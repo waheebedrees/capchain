@@ -14,47 +14,63 @@ state through ServerContext. No authorization input is ever read from
 a request header, body, or query parameter.
 """
 
-
 from __future__ import annotations
 
+from . import _constants as constants
+from . import _storage as storage
 from ._chain import attenuate as _attenuate
-from ._errors import Code, Reject
+from ._errors import Code
+from ._errors import RejectError as Reject
 from ._evidence import Evidence
-from ._gateway import Call, Gateway, Permit, Policy, ServerContext
+from ._gateway import (
+    Call,
+    Gateway,
+    Permit,
+    Policy,
+    ServerContext,
+)
 from ._issuer import EnrolledKey, TokenIssuer
-from ._keys import TrustedRoots,BaseWorkloadKey, thumbprint
-from ._proofs import make_enrollment, make_proof_of_possession
+from ._keys import (
+    BaseWorkloadKey,
+    TrustedRoots,
+    thumbprint,
+)
+from ._proofs import (
+    make_enrollment,
+    make_proof_of_possession,
+)
 from ._scope import ANY, Model, Scope
 from ._storage import (
     BudgetLedger,
     EnrollmentStore,
     InMemoryBudgetLedger,
     InMemoryEnrollments,
+    InMemoryEvidenceLog,
     InMemoryReplayStore,
     InMemoryRevocationStore,
-    ReplayStore,
-    RevocationStore,
-    RedisBudgetLedger,
-    RedisEvidenceLog,
-    RedisEnrollments,
-    RedisReplayStore,
-    RedisRevocationStore,
-    ReservationState,
     PostgresBudgetLedger,
     PostgresEnrollments,
     PostgresEvidenceLog,
     PostgresReplayStore,
     PostgresRevocationStore,
-    InMemoryEvidenceLog,
-    Stores,StoreSpec, migrate
+    RedisBudgetLedger,
+    RedisEnrollments,
+    RedisEvidenceLog,
+    RedisReplayStore,
+    RedisRevocationStore,
+    ReplayStore,
+    ReservationState,
+    RevocationStore,
+    Stores,
+    StoreSpec,
+    migrate,
 )
-from ._tls import MutualTlsAdapter, TlsAdapter, channel_binding
-
-from ._wire import  Token  as _Token
-import capchain._constants as CONSTANTS
-from . import _storage as storage
-from ._constants import MAX_STRING_CHARS
-  
+from ._tls import (
+    MutualTlsAdapter,
+    TlsAdapter,
+    channel_binding,
+)
+from ._wire import Token
 
 __version__ = "2.0.0"
 
@@ -65,11 +81,18 @@ class WorkloadKey(BaseWorkloadKey):
     __slots__ = ()
 
     def enrollment_proof(
-        self, *, issuer_id: str, channel_binding: bytes, now: int
+        self,
+        *,
+        issuer_id: str,
+        channel_binding: bytes,
+        now: int,
     ) -> bytes:
         """Prove control of this key to an issuer over the current connection."""
         return make_enrollment(
-            self, issuer_id=issuer_id, channel_binding=channel_binding, now=now
+            self,
+            issuer_id=issuer_id,
+            channel_binding=channel_binding,
+            now=now,
         )
 
     def proof_of_possession(
@@ -112,7 +135,7 @@ class WorkloadKey(BaseWorkloadKey):
         This key must be the one named by the token's leaf `cnf`.
         """
         return _attenuate(
-            _Token.decode(token),
+            Token.decode(token),
             self,
             holder=holder,
             cnf=key_thumbprint,
@@ -129,9 +152,7 @@ def _str_set(name: str, values) -> frozenset[str]:
         out = frozenset(values)
     except TypeError as e:
         raise ValueError(f"bad {name}") from e
-    if not all(
-        isinstance(x, str) and 0 < len(x) <= MAX_STRING_CHARS for x in out
-    ):
+    if not all(isinstance(x, str) and 0 < len(x) <= constants.MAX_STRING_CHARS for x in out):
         raise ValueError(f"{name}: non-empty strings only")
     return out
 
@@ -159,34 +180,26 @@ def make_policy(*, root_issuers, edges, max_depth=4):
     in configuration surfaces as an error instead of a quieter policy.
     """
     if isinstance(edges, (str, bytes)):
-        raise ValueError(
-            "edges must be an iterable of (source, target) pairs, not a string"
-        )
+        raise ValueError("edges must be an iterable of (source, target) pairs, not a string")
 
     normalized: set[tuple[str, str]] = set()
     for edge in edges:
         if isinstance(edge, (str, bytes)):
-            raise ValueError(
-                f"edge must be a (source, target) pair, not a string: {edge!r}"
-            )
+            raise ValueError(f"edge must be a (source, target) pair, not a string: {edge!r}")
         try:
             pair = tuple(edge)
         except TypeError as e:
             raise ValueError(f"bad edge {edge!r}: {e}") from e
         if len(pair) != 2:
-            raise ValueError(
-                f"edge must have exactly 2 elements: {pair!r}"
-            )
+            raise ValueError(f"edge must have exactly 2 elements: {pair!r}")
         source, target = pair
         if not (
             isinstance(source, str)
-            and 0 < len(source) <= MAX_STRING_CHARS
+            and 0 < len(source) <= constants.MAX_STRING_CHARS
             and isinstance(target, str)
-            and 0 < len(target) <= MAX_STRING_CHARS
+            and 0 < len(target) <= constants.MAX_STRING_CHARS
         ):
-            raise ValueError(
-                f"edge elements must be non-empty strings: {pair!r}"
-            )
+            raise ValueError(f"edge elements must be non-empty strings: {pair!r}")
         normalized.add((source, target))
 
     return Policy(
@@ -196,62 +209,59 @@ def make_policy(*, root_issuers, edges, max_depth=4):
     )
 
 
-
-
-
-
 __all__ = [
-    # Roles
-    "WorkloadKey",
-    "TokenIssuer",
-    "Gateway",
-    # Values
-    "TrustedRoots",
-    "EnrolledKey",
-    "Scope",
-    "Policy",
-    "ServerContext",
-    "Call",
-    "Permit",
-    "Model",
     "ANY",
-    "thumbprint",
-    # TLS
-    "TlsAdapter",
-    "MutualTlsAdapter",
-    "channel_binding",
+    "BudgetLedger",
+    "Call",
     # Errors
     "Code",
-    "Reject",
+    "EnrolledKey",
+    # Store protocols and development implementations
+    "EnrollmentStore",
     # Evidence
     "Evidence",
     "EvidenceStore",
-    "InMemoryEvidenceLog",
-    # Store protocols and development implementations
-    "EnrollmentStore",
-    "ReplayStore",
-    "BudgetLedger",
-    "RevocationStore",
-    "InMemoryEnrollments",
-    "InMemoryReplayStore",
+    "Gateway",
     "InMemoryBudgetLedger",
+    "InMemoryEnrollments",
+    "InMemoryEvidenceLog",
+    "InMemoryReplayStore",
     "InMemoryRevocationStore",
-    "make_scope", "make_policy",
-    "Stores",
-    "StoreSpec",
-    "migrate",
-    "RedisBudgetLedger",
-    "RedisEvidenceLog",
-    "RedisEnrollments",
-    "RedisReplayStore",
-    "RedisRevocationStore",
-    "ReservationState",
+    "Model",
+    "MutualTlsAdapter",
+    "Permit",
+    "Policy",
     "PostgresBudgetLedger",
     "PostgresEnrollments",
     "PostgresEvidenceLog",
     "PostgresReplayStore",
     "PostgresRevocationStore",
-    "storage",
-    "CONSTANTS",
+    "RedisBudgetLedger",
+    "RedisEnrollments",
+    "RedisEvidenceLog",
+    "RedisReplayStore",
+    "RedisRevocationStore",
+    "Reject",
+    "ReplayStore",
+    "ReservationState",
+    "RevocationStore",
+    "Scope",
+    "ServerContext",
+    "StoreSpec",
+    "Stores",
+    # TLS
+    "TlsAdapter",
+    "TokenIssuer",
+    # Values
+    "TrustedRoots",
+    # Roles
+    "WorkloadKey",
     "__version__",
+    "channel_binding",
+    "constants",
+    "make_policy",
+    "make_scope",
+    "migrate",
+    "storage",
+    "thumbprint",
 ]

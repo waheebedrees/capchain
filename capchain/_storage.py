@@ -39,40 +39,35 @@ Redis: maxmemory-policy noeviction. A Redis ledger also needs AOF
 """
 
 from __future__ import annotations
-from typing import Callable, Optional
-import re
-import os
-import logging
+
 import hashlib
-import threading
-import uuid
-from dataclasses import dataclass
-
 import json
-
+import logging
+import os
+import re
 import threading
-from typing import Optional, Protocol, TypeVar, Any
-
-from contextlib import contextmanager
-import uuid
 import time
-
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Protocol
 
 from ._constants import GENESIS_HASH, BudgetPath
-from ._chain import is_thumbprint
-from ._errors import Reject, Code
+from ._errors import Code
+from ._errors import RejectError as Reject
 from ._evidence import Evidence
-from . import _canonical as canonical
-
 
 _log = logging.getLogger("capchain.store")
 
-_TYPES = {"memory", "sqlite", "postgres", "redis"}
+TYPES = {"memory", "postgres", "redis"}
 _ALIASES = {
-    "mem": "memory", "memory": "memory",
+    "mem": "memory",
+    "memory": "memory",
     "redis": "redis",
-    "postgres": "postgres", "postgresql": "postgres",
-    "database": "postgres", "db": "postgres",
+    "postgres": "postgres",
+    "postgresql": "postgres",
+    "database": "postgres",
+    "db": "postgres",
 }
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _GENESIS = "0" * 64
@@ -83,8 +78,7 @@ _STATEMENT_TIMEOUT_MS = 5000
 def _kind(value: str) -> str:
     kind = _ALIASES.get(value.strip().lower())
     if kind is None:
-        raise ValueError(
-            f"unknown store type {value!r}; use memory, database, or redis")
+        raise ValueError(f"unknown store type {value!r}; use memory, database, or redis")
     return kind
 
 
@@ -110,11 +104,11 @@ def _replay_key(prefix: str, key: tuple[str, ...]) -> str:
 @dataclass(frozen=True, slots=True)
 class StoreSpec:
     type: str
-    redis_url: Optional[str] = None
-    postgres_dsn: Optional[str] = None
+    redis_url: str | None = None
+    postgres_dsn: str | None = None
     prefix: str = "capchain"
     schema: str = "capchain"
-    ttl_seconds: Optional[int] = None
+    ttl_seconds: int | None = None
     max_per_peer: int = 8
 
 
@@ -137,8 +131,18 @@ class SpendHandle:
 class EnrollmentStore(Protocol):
     """Bindings from workload identity to enrolled key thumbprint."""
 
-    def add(self, peer_id: str, key_thumbprint: str, now: int) -> None: ...
-    def require(self, peer_id: str, key_thumbprint: str, now: int) -> None: ...
+    def add(
+        self,
+        peer_id: str,
+        key_thumbprint: str,
+        now: int,
+    ) -> None: ...
+    def require(
+        self,
+        peer_id: str,
+        key_thumbprint: str,
+        now: int,
+    ) -> None: ...
 
 
 class ReplayStore(Protocol):
@@ -151,12 +155,15 @@ class ReplayStore(Protocol):
 
 class BudgetLedger(Protocol):
     def reserve(
-        self, cid: str, root_cap: int, path: BudgetPath, amount: int,
+        self,
+        cid: str,
+        root_cap: int,
+        path: BudgetPath,
+        amount: int,
         *,
-        expires_at: Optional[int] = None,
-        now: Optional[int] = None,
-    ) -> Optional[SpendHandle]: ...
-
+        expires_at: int | None = None,
+        now: int | None = None,
+    ) -> SpendHandle | None: ...
 
     def mark_dispatched(self, handle: SpendHandle) -> None: ...
     def settle(self, handle: SpendHandle, actual: int) -> None: ...
@@ -173,7 +180,7 @@ class RevocationStore(Protocol):
         kids: tuple[str, ...] = (),
         cids: tuple[str, ...] = (),
         jtis: tuple[str, ...] = (),
-    ) -> Optional[tuple[str, str]]: ...
+    ) -> tuple[str, str] | None: ...
 
 
 class EvidenceStore(Protocol):
@@ -192,16 +199,28 @@ class InMemoryEnrollments:
         self._entries: dict[tuple[str, str], int] = {}
         self._lock = threading.Lock()
 
-    def add(self, peer_id: str, key_thumbprint: str, now: int) -> None:
+    def add(
+        self,
+        peer_id: str,
+        key_thumbprint: str,
+        now: int,
+    ) -> None:
         with self._lock:
             self._entries[(peer_id, key_thumbprint)] = now + self._ttl
 
-    def require(self, peer_id: str, key_thumbprint: str, now: int) -> None:
+    def require(
+        self,
+        peer_id: str,
+        key_thumbprint: str,
+        now: int,
+    ) -> None:
         with self._lock:
             expires_at = self._entries.get((peer_id, key_thumbprint))
         if expires_at is None or expires_at <= now:
-            raise Reject(Code.NOT_ENROLLED,
-                         "key not enrolled for this identity")
+            raise Reject(
+                Code.NOT_ENROLLED,
+                "key not enrolled for this identity",
+            )
 
 
 class InMemoryReplayStore:
@@ -261,7 +280,8 @@ class InMemoryBudgetLedger:
         the lock. Returns the number of cids evicted."""
         outstanding_cids = {h.cid for h in self._outstanding.values()}
         dead = [
-            cid for cid, exp in self._expires_at.items()
+            cid
+            for cid, exp in self._expires_at.items()
             if exp <= now and cid not in outstanding_cids
         ]
         if not dead:
@@ -271,11 +291,8 @@ class InMemoryBudgetLedger:
             self._root_cap.pop(cid, None)
             self._remaining.pop(cid, None)
         live = self._root_cap.keys()
-        self._hop_cap = {k: v for k,
-                         v in self._hop_cap.items() if k[0] in live}
-        self._hop_spent = {
-            k: v for k, v in self._hop_spent.items() if k[0] in live
-        }
+        self._hop_cap = {k: v for k, v in self._hop_cap.items() if k[0] in live}
+        self._hop_spent = {k: v for k, v in self._hop_spent.items() if k[0] in live}
         return len(dead)
 
     def purge_expired(self, now: int) -> int:
@@ -289,9 +306,15 @@ class InMemoryBudgetLedger:
             return self._remaining.get(cid, 0)
 
     def reserve(
-        self, cid: str, root_cap: int, path: BudgetPath, amount: int,
-        *, expires_at: Optional[int] = None, now: Optional[int] = None,
-    ) -> Optional[SpendHandle]:
+        self,
+        cid: str,
+        root_cap: int,
+        path: BudgetPath,
+        amount: int,
+        *,
+        expires_at: int | None = None,
+        now: int | None = None,
+    ) -> SpendHandle | None:
         if amount < 0 or root_cap < 0 or not path:
             raise ValueError("bad reserve arguments")
 
@@ -306,7 +329,10 @@ class InMemoryBudgetLedger:
                 if expires_at is not None:
                     self._expires_at[cid] = expires_at
             elif existing != root_cap:
-                raise Reject(Code.BUDGET_CAP_CHANGED, f"cid {cid}")
+                raise Reject(
+                    Code.BUDGET_CAP_CHANGED,
+                    f"cid {cid}",
+                )
 
             if self._remaining[cid] < amount:
                 return None
@@ -316,17 +342,22 @@ class InMemoryBudgetLedger:
                 if recorded is None:
                     self._hop_cap[(cid, jti)] = cap
                 elif recorded != cap:
-                    raise Reject(Code.BUDGET_CAP_CHANGED, f"jti {jti}")
+                    raise Reject(
+                        Code.BUDGET_CAP_CHANGED,
+                        f"jti {jti}",
+                    )
                 if self._hop_spent.get((cid, jti), 0) + amount > cap:
                     return None
 
             self._remaining[cid] -= amount
             for jti, _ in path:
-                self._hop_spent[(cid, jti)] = self._hop_spent.get(
-                    (cid, jti), 0) + amount
+                self._hop_spent[(cid, jti)] = self._hop_spent.get((cid, jti), 0) + amount
 
             handle = SpendHandle(
-                cid=cid, amount=amount, handle=uuid.uuid4().hex, path=path
+                cid=cid,
+                amount=amount,
+                handle=uuid.uuid4().hex,
+                path=path,
             )
             self._outstanding[handle.handle] = handle
             return handle
@@ -335,17 +366,26 @@ class InMemoryBudgetLedger:
         with self._lock:
             record = self._outstanding.get(handle.handle)
             if record is None or record.state != ReservationState.RESERVED:
-                raise Reject(Code.INTERNAL, "dispatch from invalid state")
+                raise Reject(
+                    Code.INTERNAL,
+                    "dispatch from invalid state",
+                )
             record.state = handle.state = ReservationState.DISPATCHED
 
     def settle(self, handle: SpendHandle, actual: int) -> None:
         if type(actual) is not int or actual < 0:
-            raise Reject(Code.INTERNAL, "actual must be a non-negative int")
+            raise Reject(
+                Code.INTERNAL,
+                "actual must be a non-negative int",
+            )
 
         with self._lock:
             record = self._outstanding.get(handle.handle)
             if record is None:
-                raise Reject(Code.INTERNAL, "settle: handle not found")
+                raise Reject(
+                    Code.INTERNAL,
+                    "settle: handle not found",
+                )
             if record.state != ReservationState.DISPATCHED:
                 raise Reject(
                     Code.INTERNAL,
@@ -355,20 +395,28 @@ class InMemoryBudgetLedger:
             delta = actual - record.amount
             if delta != 0:
                 if self._remaining[record.cid] - delta < 0:
-                    raise Reject(Code.BUDGET_EXHAUSTED, "root cap on settle")
+                    raise Reject(
+                        Code.BUDGET_EXHAUSTED,
+                        "root cap on settle",
+                    )
                 updated: dict[tuple[str, str], int] = {}
                 for jti, cap in record.path:
                     spent = self._hop_spent.get((record.cid, jti), 0) + delta
                     if spent < 0 or spent > cap:
-                        raise Reject(Code.BUDGET_EXHAUSTED,
-                                     f"hop {jti} on settle")
+                        raise Reject(
+                            Code.BUDGET_EXHAUSTED,
+                            f"hop {jti} on settle",
+                        )
                     updated[(record.cid, jti)] = spent
                 self._remaining[record.cid] -= delta
                 self._hop_spent.update(updated)
                 record.amount = actual
 
             record.state = ReservationState.SETTLED
-            handle.amount, handle.state = record.amount, record.state
+            handle.amount, handle.state = (
+                record.amount,
+                record.state,
+            )
 
     def commit(self, handle: SpendHandle) -> None:
         with self._lock:
@@ -380,13 +428,13 @@ class InMemoryBudgetLedger:
             if record is None or record.state != ReservationState.RESERVED:
                 return
             self._outstanding.pop(handle.handle, None)
-            self._remaining[record.cid] = (
-                self._remaining.get(record.cid, 0) + record.amount
-            )
+            self._remaining[record.cid] = self._remaining.get(record.cid, 0) + record.amount
             for jti, _ in record.path:
                 key = (record.cid, jti)
                 self._hop_spent[key] = max(
-                    0, self._hop_spent.get(key, 0) - record.amount)
+                    0,
+                    self._hop_spent.get(key, 0) - record.amount,
+                )
             handle.state = ReservationState.CANCELLED
 
 
@@ -423,7 +471,7 @@ class InMemoryRevocationStore:
         kids: tuple[str, ...] = (),
         cids: tuple[str, ...] = (),
         jtis: tuple[str, ...] = (),
-    ) -> Optional[tuple[str, str]]:
+    ) -> tuple[str, str] | None:
         with self._lock:
             for kind, candidates, revoked in (
                 ("agent", agents, self._agents),
@@ -472,24 +520,26 @@ class InMemoryEvidenceLog:
 def _check_redis(clients: _Clients, env: str) -> None:
     for client in clients._redis.values():
         try:
-            policy = client.config_get("maxmemory-policy").get(
-                "maxmemory-policy", "noeviction")
+            policy = client.config_get("maxmemory-policy").get("maxmemory-policy", "noeviction")
         except Exception as e:
             if env == "production":
-                raise RuntimeError(
-                    "cannot verify Redis maxmemory-policy") from e
-            _log.warning("capchain: Redis policy check skipped: %s",
-                         type(e).__name__)
+                raise RuntimeError("cannot verify Redis maxmemory-policy") from e
+            _log.warning(
+                "capchain: Redis policy check skipped: %s",
+                type(e).__name__,
+            )
             continue
         if policy != "noeviction":
             raise RuntimeError(
                 f"Redis maxmemory-policy is {policy!r}; capchain requires "
-                f"noeviction (evicting a nonce or a revocation fails open)")
+                f"noeviction (evicting a nonce or a revocation fails open)"
+            )
         if env == "production":
             info = client.info("persistence")
             if not info.get("aof_enabled"):
-                _log.warning("capchain: Redis AOF is off; do not use this "
-                             "Redis as the budget ledger")
+                _log.warning(
+                    "capchain: Redis AOF is off; do not use this Redis as the budget ledger"
+                )
 
 
 @dataclass
@@ -503,82 +553,146 @@ class Stores:
     _close: Callable[[], None]
 
     @classmethod
-    def open(cls, type: str = "memory", *,
-             redis_url: Optional[str] = None,
-             postgres_dsn: Optional[str] = None,
-             replay: Optional[str] = None,
-             ledger: Optional[str] = None,
-             revocation: Optional[str] = None,
-             evidence: Optional[str] = None,
-             enrollments: Optional[str] = None,
-             env: Optional[str] = None,
-             prefix: str = "capchain",
-             schema: str = "capchain",
-             replay_ttl: int = 300,
-             enroll_ttl: int = 3600,
-             enroll_max_per_peer: int = 8) -> "Stores":
+    def open(
+        cls,
+        type: str = "memory",
+        *,
+        redis_url: str | None = None,
+        postgres_dsn: str | None = None,
+        replay: str | None = None,
+        ledger: str | None = None,
+        revocation: str | None = None,
+        evidence: str | None = None,
+        enrollments: str | None = None,
+        env: str | None = None,
+        prefix: str = "capchain",
+        schema: str = "capchain",
+        replay_ttl: int = 300,
+        enroll_ttl: int = 3600,
+        enroll_max_per_peer: int = 8,
+    ) -> Stores:
         """`type` is the default. Pass ledger='database' to override one."""
-        def spec(override: Optional[str], ttl: Optional[int]) -> StoreSpec:
+
+        def spec(override: str | None, ttl: int | None) -> StoreSpec:
             return StoreSpec(
                 type=_kind(override or type),
-                redis_url=redis_url, postgres_dsn=postgres_dsn,
-                prefix=prefix, schema=_ident("schema", schema),
-                ttl_seconds=ttl, max_per_peer=enroll_max_per_peer)
+                redis_url=redis_url,
+                postgres_dsn=postgres_dsn,
+                prefix=prefix,
+                schema=_ident("schema", schema),
+                ttl_seconds=ttl,
+                max_per_peer=enroll_max_per_peer,
+            )
+
         return cls._build(
             replay=spec(replay, replay_ttl),
             ledger=spec(ledger, None),
             revocation=spec(revocation, None),
             evidence=spec(evidence, None),
             enrollments=spec(enrollments, enroll_ttl),
-            env=env or os.environ.get("CAPCHAIN_ENV", "development"))
+            env=env or os.environ.get("CAPCHAIN_ENV", "development"),
+        )
 
     @classmethod
-    def from_env(cls) -> "Stores":
+    def from_env(cls) -> Stores:
         default = os.environ.get("CAPCHAIN_STORE", "memory")
         redis_url = os.environ.get("CAPCHAIN_REDIS_URL")
         dsn = os.environ.get("CAPCHAIN_POSTGRES_DSN")
         prefix = os.environ.get("CAPCHAIN_REDIS_PREFIX", "capchain")
         schema = os.environ.get("CAPCHAIN_POSTGRES_SCHEMA", "capchain")
-        max_per_peer=int(os.environ.get("CAPCHAIN_ENROLL_MAX_PER_PEER", "8"))
-        def one(name: str, ttl_env: str,
-                default_ttl: Optional[int]) -> StoreSpec:
+        max_per_peer = int(
+            os.environ.get(
+                "CAPCHAIN_ENROLL_MAX_PER_PEER",
+                "8",
+            )
+        )
+
+        def one(
+            name: str,
+            ttl_env: str,
+            default_ttl: int | None,
+        ) -> StoreSpec:
             # ttl_env is explicit; the store's TTL variable name does not
             # always match its store name (see ENROLL below).
             raw_ttl = os.environ.get(ttl_env)
             ttl = int(raw_ttl) if raw_ttl is not None else default_ttl
-            
+
             spec = StoreSpec(
-                type=_kind(os.environ.get(f"CAPCHAIN_STORE_{name}", default)),
+                type=_kind(
+                    os.environ.get(
+                        f"CAPCHAIN_STORE_{name}",
+                        default,
+                    )
+                ),
                 redis_url=os.environ.get(
-                    f"CAPCHAIN_{name}_REDIS_URL", redis_url),
+                    f"CAPCHAIN_{name}_REDIS_URL",
+                    redis_url,
+                ),
                 postgres_dsn=os.environ.get(
-                    f"CAPCHAIN_{name}_POSTGRES_DSN", dsn),
-                prefix=prefix, schema=_ident("schema", schema),
+                    f"CAPCHAIN_{name}_POSTGRES_DSN",
+                    dsn,
+                ),
+                prefix=prefix,
+                schema=_ident("schema", schema),
                 ttl_seconds=ttl,
-                max_per_peer=max_per_peer
+                max_per_peer=max_per_peer,
             )
             return spec
+
         return cls._build(
-            replay=one("REPLAY", "CAPCHAIN_REPLAY_TTL", 300),
-            ledger=one("LEDGER", "CAPCHAIN_LEDGER_TTL", None),
-            revocation=one("REVOCATION", "CAPCHAIN_REVOCATION_TTL", None),
-            evidence=one("EVIDENCE", "CAPCHAIN_EVIDENCE_TTL", None),
-            enrollments=one("ENROLLMENTS", "CAPCHAIN_ENROLL_TTL", 3600),
-            env=os.environ.get("CAPCHAIN_ENV", "development"))
+            replay=one(
+                "REPLAY",
+                "CAPCHAIN_REPLAY_TTL",
+                300,
+            ),
+            ledger=one(
+                "LEDGER",
+                "CAPCHAIN_LEDGER_TTL",
+                None,
+            ),
+            revocation=one(
+                "REVOCATION",
+                "CAPCHAIN_REVOCATION_TTL",
+                None,
+            ),
+            evidence=one(
+                "EVIDENCE",
+                "CAPCHAIN_EVIDENCE_TTL",
+                None,
+            ),
+            enrollments=one(
+                "ENROLLMENTS",
+                "CAPCHAIN_ENROLL_TTL",
+                3600,
+            ),
+            env=os.environ.get("CAPCHAIN_ENV", "development"),
+        )
 
     @classmethod
-    def _build(cls, *, replay: StoreSpec, ledger: StoreSpec,
-               revocation: StoreSpec, evidence: StoreSpec,
-               enrollments: StoreSpec, env: str) -> "Stores":
-        specs = (("replay", replay), ("ledger", ledger),
-                 ("revocation", revocation), ("evidence", evidence),
-                 ("enrollments", enrollments))
+    def _build(
+        cls,
+        *,
+        replay: StoreSpec,
+        ledger: StoreSpec,
+        revocation: StoreSpec,
+        evidence: StoreSpec,
+        enrollments: StoreSpec,
+        env: str,
+    ) -> Stores:
+        specs = (
+            ("replay", replay),
+            ("ledger", ledger),
+            ("revocation", revocation),
+            ("evidence", evidence),
+            ("enrollments", enrollments),
+        )
         if env == "production":
             for name, spec in specs:
                 if spec.type == "memory":
                     raise RuntimeError(
                         f"{name}: memory is process-local and is refused "
-                        f"when CAPCHAIN_ENV=production")
+                        f"when CAPCHAIN_ENV=production"
+                    )
         clients = _Clients()
         try:
             built = cls(
@@ -587,7 +701,9 @@ class Stores:
                 revocation=_open_revocation(revocation, clients),
                 evidence=_open_evidence(evidence, clients),
                 enrollments=_open_enrollments(enrollments, clients),
-                env=env, _close=clients.close)
+                env=env,
+                _close=clients.close,
+            )
             built.ping()
             _check_redis(clients, env)
         except BaseException:
@@ -595,28 +711,45 @@ class Stores:
             # otherwise a crash-loop leaks fds against healthy backends.
             clients.close()
             raise
-        _log.info("capchain stores env=%s replay=%s ledger=%s "
-                  "revocation=%s evidence=%s enrollments=%s",
-                  env, replay.type, ledger.type, revocation.type,
-                  evidence.type, enrollments.type)
+        _log.info(
+            "capchain stores env=%s replay=%s ledger=%s revocation=%s evidence=%s enrollments=%s",
+            env,
+            replay.type,
+            ledger.type,
+            revocation.type,
+            evidence.type,
+            enrollments.type,
+        )
         if ledger.type == "redis":
-            _log.warning("capchain: Redis ledger survives only its AOF "
-                         "window; prefer database for the ledger")
+            _log.warning(
+                "capchain: Redis ledger survives only its AOF "
+                "window; prefer database for the ledger"
+            )
         if evidence.type == "redis":
-            _log.warning("capchain: Redis evidence is not an insert-only "
-                         "log; prefer database for evidence")
+            _log.warning(
+                "capchain: Redis evidence is not an insert-only log; prefer database for evidence"
+            )
         return built
 
     def as_gateway_kwargs(self) -> dict:
-        return {"ledger": self.ledger, "replay": self.replay,
-                "revocation": self.revocation, "evidence": self.evidence}
+        return {
+            "ledger": self.ledger,
+            "replay": self.replay,
+            "revocation": self.revocation,
+            "evidence": self.evidence,
+        }
 
     def as_issuer_kwargs(self) -> dict:
         return {"enrollments": self.enrollments}
 
     def ping(self) -> None:
-        for store in (self.replay, self.ledger, self.revocation,
-                      self.evidence, self.enrollments):
+        for store in (
+            self.replay,
+            self.ledger,
+            self.revocation,
+            self.evidence,
+            self.enrollments,
+        ):
             ping = getattr(store, "ping", None)
             if ping is not None:
                 ping()
@@ -624,7 +757,7 @@ class Stores:
     def close(self) -> None:
         self._close()
 
-    def __enter__(self) -> "Stores":
+    def __enter__(self) -> Stores:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -637,10 +770,9 @@ class _Clients:
         self.pg: dict[str, object] = {}
         self._redis_urls: list[str] = []
 
-    def redis(self, url: Optional[str], prefix: str) -> tuple[object, str]:
+    def redis(self, url: str | None, prefix: str) -> tuple[object, str]:
         if not url:
-            raise ValueError(
-                "redis store requires redis_url / CAPCHAIN_REDIS_URL")
+            raise ValueError("redis store requires redis_url / CAPCHAIN_REDIS_URL")
         client = self._redis.get(url)
         if client is None:
             try:
@@ -648,30 +780,38 @@ class _Clients:
             except ImportError as e:
                 raise RuntimeError("pip install 'redis>=5'") from e
             client = redis.Redis.from_url(
-                url, decode_responses=True,
+                url,
+                decode_responses=True,
                 socket_timeout=_SOCKET_TIMEOUT,
-                health_check_interval=30)
+                health_check_interval=30,
+            )
             self._redis[url] = client
             self._redis_urls.append(url)
         return client, prefix
 
-    def pool(self, dsn: Optional[str], schema: str) -> object:
+    def pool(self, dsn: str | None, schema: str) -> object:
         if not dsn:
-            raise ValueError(
-                "database store requires postgres_dsn / CAPCHAIN_POSTGRES_DSN")
+            raise ValueError("database store requires postgres_dsn / CAPCHAIN_POSTGRES_DSN")
         key = dsn + "\0" + schema
         pool = self.pg.get(key)
         if pool is None:
             try:
-                from psycopg_pool import ConnectionPool
+                from psycopg_pool import (
+                    ConnectionPool,
+                )
             except ImportError as e:
-                raise RuntimeError(
-                    "pip install 'psycopg[binary]>=3.1' 'psycopg-pool>=3.2'") from e
+                raise RuntimeError("pip install 'psycopg[binary]>=3.1' 'psycopg-pool>=3.2'") from e
             pool = ConnectionPool(
-                dsn, min_size=1, max_size=8, timeout=_SOCKET_TIMEOUT,
-                kwargs={"autocommit": False,
-                        "options": f"-c search_path={schema}"},
-                open=True)
+                dsn,
+                min_size=1,
+                max_size=8,
+                timeout=_SOCKET_TIMEOUT,
+                kwargs={
+                    "autocommit": False,
+                    "options": f"-c search_path={schema}",
+                },
+                open=True,
+            )
             self.pg[key] = pool
         return pool
 
@@ -694,8 +834,10 @@ def _open_replay(spec: StoreSpec, clients: _Clients) -> object:
     if spec.type == "redis":
         client, prefix = clients.redis(spec.redis_url, spec.prefix)
         return RedisReplayStore(client, ttl_seconds=ttl, prefix=prefix)
-    return PostgresReplayStore(clients.pool(spec.postgres_dsn, spec.schema),
-                               ttl_seconds=ttl)
+    return PostgresReplayStore(
+        clients.pool(spec.postgres_dsn, spec.schema),
+        ttl_seconds=ttl,
+    )
 
 
 def _open_ledger(spec: StoreSpec, clients: _Clients) -> object:
@@ -731,14 +873,24 @@ def _open_enrollments(spec: StoreSpec, clients: _Clients) -> object:
         return InMemoryEnrollments(ttl_seconds=ttl)
     if spec.type == "redis":
         client, prefix = clients.redis(spec.redis_url, spec.prefix)
-        return RedisEnrollments(client, ttl_seconds=ttl,
-                                max_per_peer=spec.max_per_peer, prefix=prefix)
-    return PostgresEnrollments(clients.pool(spec.postgres_dsn, spec.schema),
-                               ttl_seconds=ttl, max_per_peer=spec.max_per_peer)
+        return RedisEnrollments(
+            client,
+            ttl_seconds=ttl,
+            max_per_peer=spec.max_per_peer,
+            prefix=prefix,
+        )
+    return PostgresEnrollments(
+        clients.pool(spec.postgres_dsn, spec.schema),
+        ttl_seconds=ttl,
+        max_per_peer=spec.max_per_peer,
+    )
 
 
 def _dump_path(path: tuple) -> str:
-    return json.dumps([[j, c] for j, c in path], separators=(",", ":"))
+    return json.dumps(
+        [[j, c] for j, c in path],
+        separators=(",", ":"),
+    )
 
 
 def _load_path(raw: str) -> tuple:
@@ -772,15 +924,29 @@ def _evidence(draft: dict, prev_hash: str) -> Evidence:
 
 
 def _dump_evidence(ev: Evidence) -> str:
-    return json.dumps({
-        "action_id": ev.action_id, "code": ev.code, "cid": ev.cid,
-        "jtis": list(ev.jtis), "peer_id": ev.peer_id, "issuer": ev.issuer,
-        "holder": ev.holder, "action": ev.action, "resource": ev.resource,
-        "payload_hash": ev.payload_hash, "cost_micros": ev.cost_micros,
-        "ts": ev.ts, "pop_thumbprint": ev.pop_thumbprint,
-        "channel_bound": ev.channel_bound, "prev_hash": ev.prev_hash,
-        "verifier": ev.verifier, "related_id": ev.related_id,
-    }, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        {
+            "action_id": ev.action_id,
+            "code": ev.code,
+            "cid": ev.cid,
+            "jtis": list(ev.jtis),
+            "peer_id": ev.peer_id,
+            "issuer": ev.issuer,
+            "holder": ev.holder,
+            "action": ev.action,
+            "resource": ev.resource,
+            "payload_hash": ev.payload_hash,
+            "cost_micros": ev.cost_micros,
+            "ts": ev.ts,
+            "pop_thumbprint": ev.pop_thumbprint,
+            "channel_bound": ev.channel_bound,
+            "prev_hash": ev.prev_hash,
+            "verifier": ev.verifier,
+            "related_id": ev.related_id,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _load_evidence(raw: str) -> Evidence:
@@ -944,7 +1110,10 @@ return 1
 
 def _lua_reply(raw: object) -> str:
     if not isinstance(raw, (list, tuple)) or not raw:
-        raise Reject(Code.STATE_UNAVAILABLE, "bad redis script reply")
+        raise Reject(
+            Code.STATE_UNAVAILABLE,
+            "bad redis script reply",
+        )
     kind = raw[0]
     if kind in ("ok", "full"):
         return str(kind)
@@ -952,11 +1121,19 @@ def _lua_reply(raw: object) -> str:
         code = raw[1] if len(raw) > 1 else Code.INTERNAL
         detail = raw[2] if len(raw) > 2 else ""
         raise Reject(str(code), str(detail))
-    raise Reject(Code.STATE_UNAVAILABLE, "bad redis script reply")
+    raise Reject(
+        Code.STATE_UNAVAILABLE,
+        "bad redis script reply",
+    )
 
 
 class RedisReplayStore:
-    def __init__(self, client: object, ttl_seconds: int, prefix: str) -> None:
+    def __init__(
+        self,
+        client: object,
+        ttl_seconds: int,
+        prefix: str,
+    ) -> None:
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be > 0")
         self._r = client
@@ -973,8 +1150,14 @@ class RedisReplayStore:
         # `now` is unused: expiry is relative, so a skewed Redis clock
         # cannot extend a nonce past ttl_seconds.
         del now
-        return bool(self._r.set(
-            _replay_key(self._prefix, key), "1", nx=True, ex=self._ttl))
+        return bool(
+            self._r.set(
+                _replay_key(self._prefix, key),
+                "1",
+                nx=True,
+                ex=self._ttl,
+            )
+        )
 
     def ping(self) -> None:
         self._r.ping()
@@ -1009,43 +1192,70 @@ class RedisBudgetLedger:
         return int(val) if val is not None else 0
 
     def reserve(
-        self, cid: str, root_cap: int, path: tuple, amount: int,
-        *, expires_at: Optional[int] = None, now: Optional[int] = None,
-    ) -> Optional[SpendHandle]:
+        self,
+        cid: str,
+        root_cap: int,
+        path: tuple,
+        amount: int,
+        *,
+        expires_at: int | None = None,
+        now: int | None = None,
+    ) -> SpendHandle | None:
         if amount < 0 or root_cap < 0:
             raise ValueError("bad reserve args")
         ordered = _check_path(path)
         handle = uuid.uuid4().hex
-        keys = (self._chain(cid), self._res(cid, handle), *self._hops(cid, path))
+        keys = (
+            self._chain(cid),
+            self._res(cid, handle),
+            *self._hops(cid, path),
+        )
         args = [
-            amount, root_cap, handle, cid, _dump_path(path),
-            now if now is not None else _now(),         # ← use caller's clock
+            amount,
+            root_cap,
+            handle,
+            cid,
+            _dump_path(path),
+            now if now is not None else _now(),  # ← use caller's clock
             *[cap for _, cap in ordered],
         ]
         if _lua_reply(self._reserve(keys=list(keys), args=args)) == "full":
             return None
-        return SpendHandle(cid=cid, amount=amount, handle=handle, path=path)
+        return SpendHandle(
+            cid=cid,
+            amount=amount,
+            handle=handle,
+            path=path,
+        )
 
     def mark_dispatched(self, handle: SpendHandle) -> None:
         _lua_reply(self._dispatch(keys=[self._res(handle.cid, handle.handle)]))
-        handle.state = ReservationState.DISPATCHED            # ← ADD
-
+        handle.state = ReservationState.DISPATCHED  # ← ADD
 
     def settle(self, handle: SpendHandle, actual: int) -> None:
         if type(actual) is not int or actual < 0:
-            raise Reject(Code.INTERNAL, "actual must be a non-negative int")
-        keys = [self._chain(handle.cid), self._res(handle.cid, handle.handle),
-                *self._hops(handle.cid, handle.path)]
+            raise Reject(
+                Code.INTERNAL,
+                "actual must be a non-negative int",
+            )
+        keys = [
+            self._chain(handle.cid),
+            self._res(handle.cid, handle.handle),
+            *self._hops(handle.cid, handle.path),
+        ]
         _lua_reply(self._settle(keys=keys, args=[actual]))
-        handle.amount = actual                                # ← ADD
-        handle.state = ReservationState.SETTLED               # ← ADD
+        handle.amount = actual  # ← ADD
+        handle.state = ReservationState.SETTLED  # ← ADD
 
     def commit(self, handle: SpendHandle) -> None:
         self._r.delete(self._res(handle.cid, handle.handle))
 
     def refund(self, handle: SpendHandle) -> None:
-        keys = [self._chain(handle.cid), self._res(handle.cid, handle.handle),
-                *self._hops(handle.cid, handle.path)]
+        keys = [
+            self._chain(handle.cid),
+            self._res(handle.cid, handle.handle),
+            *self._hops(handle.cid, handle.path),
+        ]
         _lua_reply(self._refund(keys=keys))
         handle.state = ReservationState.CANCELLED
 
@@ -1073,11 +1283,20 @@ class RedisRevocationStore:
     def revoke_token(self, value: str) -> None:
         self._r.sadd(self._key("jti"), value)
 
-    def find_revoked(self, *, agents: tuple[str, ...] = (),
-                     kids: tuple[str, ...] = (), cids: tuple[str, ...] = (),
-                     jtis: tuple[str, ...] = ()) -> Optional[tuple[str, str]]:
-        pairs = [("agent", agents), ("kid", kids),
-                 ("cid", cids), ("jti", jtis)]
+    def find_revoked(
+        self,
+        *,
+        agents: tuple[str, ...] = (),
+        kids: tuple[str, ...] = (),
+        cids: tuple[str, ...] = (),
+        jtis: tuple[str, ...] = (),
+    ) -> tuple[str, str] | None:
+        pairs = [
+            ("agent", agents),
+            ("kid", kids),
+            ("cid", cids),
+            ("jti", jtis),
+        ]
         pipe = self._r.pipeline()
         flat: list[tuple[str, str]] = []
         for kind, items in pairs:
@@ -1086,7 +1305,7 @@ class RedisRevocationStore:
                 flat.append((kind, item))
         if not flat:
             return None
-        for hit, pair in zip(pipe.execute(), flat):
+        for hit, pair in zip(pipe.execute(), flat, strict=False):
             if hit:
                 return pair
         return None
@@ -1096,8 +1315,13 @@ class RedisRevocationStore:
 
 
 class RedisEnrollments:
-    def __init__(self, client: object, ttl_seconds: int, max_per_peer: int,
-                 prefix: str) -> None:
+    def __init__(
+        self,
+        client: object,
+        ttl_seconds: int,
+        max_per_peer: int,
+        prefix: str,
+    ) -> None:
         if ttl_seconds <= 0 or max_per_peer <= 0:
             raise ValueError("ttl_seconds and max_per_peer must be > 0")
         self._r = client
@@ -1111,15 +1335,27 @@ class RedisEnrollments:
         return f"{self._prefix}:enroll:{peer_id}"
 
     def add(self, peer_id: str, cnf: str, now: int) -> None:
-        self._add(keys=[self._key(peer_id)],
-                  args=[cnf, now, now + self._ttl, self._max])
+        self._add(
+            keys=[self._key(peer_id)],
+            args=[
+                cnf,
+                now,
+                now + self._ttl,
+                self._max,
+            ],
+        )
 
     def require(self, peer_id: str, cnf: str, now: int) -> None:
-        if not self._require(keys=[self._key(peer_id)], args=[cnf, now]):
-            raise Reject(Code.NOT_ENROLLED,
-                         "key not enrolled for this SPIFFE ID")
+        if not self._require(
+            keys=[self._key(peer_id)],
+            args=[cnf, now],
+        ):
+            raise Reject(
+                Code.NOT_ENROLLED,
+                "key not enrolled for this SPIFFE ID",
+            )
 
-    def revoke(self, peer_id: str, cnf: Optional[str] = None) -> None:
+    def revoke(self, peer_id: str, cnf: str | None = None) -> None:
         if cnf is None:
             self._r.delete(self._key(peer_id))
         else:
@@ -1132,6 +1368,7 @@ class RedisEnrollments:
 class RedisEvidenceLog:
     def __init__(self, client: object, prefix: str) -> None:
         import redis.exceptions as _redis_exc
+
         self._r = client
         self._watch_error = _redis_exc.WatchError
         self._head = f"{prefix}:evidence:head"
@@ -1145,13 +1382,19 @@ class RedisEvidenceLog:
                     head = pipe.get(self._head) or _GENESIS
                     ev = _evidence(draft, head)
                     pipe.multi()
-                    pipe.rpush(self._log, _dump_evidence(ev))
+                    pipe.rpush(
+                        self._log,
+                        _dump_evidence(ev),
+                    )
                     pipe.set(self._head, ev.digest())
                     pipe.execute()
                     return ev
                 except self._watch_error:
                     continue
-        raise Reject(Code.STATE_UNAVAILABLE, "evidence contention")
+        raise Reject(
+            Code.STATE_UNAVAILABLE,
+            "evidence contention",
+        )
 
     def verify_integrity(self) -> bool:
         prev = _GENESIS
@@ -1170,8 +1413,7 @@ class RedisEvidenceLog:
         return prev == head
 
     def records(self) -> tuple[Evidence, ...]:
-        return tuple(_load_evidence(raw)
-                     for raw in self._r.lrange(self._log, 0, -1))
+        return tuple(_load_evidence(raw) for raw in self._r.lrange(self._log, 0, -1))
 
     def ping(self) -> None:
         self._r.ping()
@@ -1249,9 +1491,13 @@ def _statements(sql: str) -> list[str]:
     return out
 
 
-def migrate(dsn: Optional[str] = None, schema: str = "capchain") -> None:
+def migrate(
+    dsn: str | None = None,
+    schema: str = "capchain",
+) -> None:
     """Create the schema. Run once from an init container, not from agents."""
     import psycopg
+
     dsn = dsn or os.environ["CAPCHAIN_POSTGRES_DSN"]
     schema = _ident("schema", schema)
     with psycopg.connect(dsn, autocommit=True) as conn:
@@ -1260,8 +1506,9 @@ def migrate(dsn: Optional[str] = None, schema: str = "capchain") -> None:
         for stmt in _statements(SCHEMA_SQL):
             conn.execute(stmt)
         conn.execute(
-            "INSERT INTO evidence_head (id, head) VALUES (1, %s) "
-            "ON CONFLICT (id) DO NOTHING", (_GENESIS,))
+            "INSERT INTO evidence_head (id, head) VALUES (1, %s) ON CONFLICT (id) DO NOTHING",
+            (_GENESIS,),
+        )
 
 
 class _Pg:
@@ -1272,11 +1519,16 @@ class _Pg:
         return self._pool.connection()
 
     def _timeout(self, cur: object) -> None:
-        cur.execute("SELECT set_config('statement_timeout', %s, true)",
-                    (str(_STATEMENT_TIMEOUT_MS),))
+        cur.execute(
+            "SELECT set_config('statement_timeout', %s, true)",
+            (str(_STATEMENT_TIMEOUT_MS),),
+        )
 
     def ping(self) -> None:
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute("SELECT 1")
 
 
@@ -1294,7 +1546,11 @@ class PostgresReplayStore(_Pg):
     def consume(self, key: tuple[str, ...], now: int) -> bool:
         encoded = _replay_key("nonce", key)
         expires = now + self._ttl
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
             # Insert, or take over a row whose verifier-clock expiry has passed.
             cur.execute(
@@ -1303,13 +1559,21 @@ class PostgresReplayStore(_Pg):
                 ON CONFLICT (key) DO UPDATE SET expires_at = EXCLUDED.expires_at
                 WHERE replay_nonces.expires_at <= %s
                 RETURNING key
-                """, (encoded, expires, now))
+                """,
+                (encoded, expires, now),
+            )
             return cur.fetchone() is not None
 
     def prune(self, now: int) -> int:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             cur.execute(
-                "DELETE FROM replay_nonces WHERE expires_at <= %s", (now,))
+                "DELETE FROM replay_nonces WHERE expires_at <= %s",
+                (now,),
+            )
             return cur.rowcount
 
 
@@ -1319,21 +1583,36 @@ class PostgresBudgetLedger(_Pg):
     one cid cannot deadlock."""
 
     def remaining(self, cid: str) -> int:
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute(
-                "SELECT remaining FROM budget_chains WHERE cid = %s", (cid,))
+                "SELECT remaining FROM budget_chains WHERE cid = %s",
+                (cid,),
+            )
             row = cur.fetchone()
             return int(row[0]) if row else 0
 
     def reserve(
-        self, cid: str, root_cap: int, path: tuple, amount: int,
-        *, expires_at: Optional[int] = None, now: Optional[int] = None,
-    ) -> Optional[SpendHandle]:
-        
+        self,
+        cid: str,
+        root_cap: int,
+        path: tuple,
+        amount: int,
+        *,
+        expires_at: int | None = None,
+        now: int | None = None,
+    ) -> SpendHandle | None:
+
         if amount < 0 or root_cap < 0:
             raise ValueError("bad reserve args")
         ordered = _check_path(path)
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
             cur.execute(
                 """INSERT INTO budget_chains (cid, root_cap, remaining)
@@ -1341,147 +1620,226 @@ class PostgresBudgetLedger(_Pg):
                 (cid, root_cap, root_cap),
             )
             cur.execute(
-                "SELECT root_cap, remaining FROM budget_chains "
-                "WHERE cid = %s FOR UPDATE",
+                "SELECT root_cap, remaining FROM budget_chains WHERE cid = %s FOR UPDATE",
                 (cid,),
             )
             cur.execute(
                 "SELECT root_cap, remaining FROM budget_chains WHERE cid = %s FOR UPDATE",
-                (cid,))
+                (cid,),
+            )
             db_root, db_rem = cur.fetchone()
             if db_root != root_cap:
-                raise Reject(Code.BUDGET_CAP_CHANGED, f"cid {cid}")
+                raise Reject(
+                    Code.BUDGET_CAP_CHANGED,
+                    f"cid {cid}",
+                )
             fits = db_rem >= amount
             for jti, cap in ordered:
                 cur.execute(
                     """INSERT INTO budget_hops (cid, jti, cap, spent)
                        VALUES (%s, %s, %s, 0) ON CONFLICT (cid, jti) DO NOTHING""",
-                    (cid, jti, cap))
+                    (cid, jti, cap),
+                )
                 cur.execute(
                     """SELECT cap, spent FROM budget_hops
-                       WHERE cid = %s AND jti = %s FOR UPDATE""", (cid, jti))
+                       WHERE cid = %s AND jti = %s FOR UPDATE""",
+                    (cid, jti),
+                )
                 db_cap, db_spent = cur.fetchone()
                 if db_cap != cap:
-                    raise Reject(Code.BUDGET_CAP_CHANGED, f"jti {jti}")
+                    raise Reject(
+                        Code.BUDGET_CAP_CHANGED,
+                        f"jti {jti}",
+                    )
                 if db_spent + amount > db_cap:
                     fits = False
             if not fits:
                 return None  # commits the cap rows; does not deduct
             cur.execute(
                 "UPDATE budget_chains SET remaining = remaining - %s WHERE cid = %s",
-                (amount, cid))
+                (amount, cid),
+            )
             for jti, _ in ordered:
                 cur.execute(
                     """UPDATE budget_hops SET spent = spent + %s
-                       WHERE cid = %s AND jti = %s""", (amount, cid, jti))
+                       WHERE cid = %s AND jti = %s""",
+                    (amount, cid, jti),
+                )
             handle = uuid.uuid4().hex
             cur.execute(
                 """INSERT INTO budget_reservations (handle, cid, amount, path_json, state)
                    VALUES (%s, %s, %s, %s, 'reserved')""",
-                (handle, cid, amount, _dump_path(path)))
-            return SpendHandle(cid=cid, amount=amount, handle=handle, path=path)
-
+                (
+                    handle,
+                    cid,
+                    amount,
+                    _dump_path(path),
+                ),
+            )
+            return SpendHandle(
+                cid=cid,
+                amount=amount,
+                handle=handle,
+                path=path,
+            )
 
     def mark_dispatched(self, handle: SpendHandle) -> None:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
-            cur.execute("SELECT cid FROM budget_chains WHERE cid = %s FOR UPDATE",
-                        (handle.cid,))
+            cur.execute(
+                "SELECT cid FROM budget_chains WHERE cid = %s FOR UPDATE",
+                (handle.cid,),
+            )
             cur.execute(
                 """UPDATE budget_reservations SET state = 'dispatched'
-                WHERE handle = %s AND state = 'reserved'""", (handle.handle,))
+                WHERE handle = %s AND state = 'reserved'""",
+                (handle.handle,),
+            )
             if cur.rowcount != 1:
-                raise Reject(Code.INTERNAL, "dispatch: bad state")
-        handle.state = ReservationState.DISPATCHED         
-        
+                raise Reject(
+                    Code.INTERNAL,
+                    "dispatch: bad state",
+                )
+        handle.state = ReservationState.DISPATCHED
 
     def settle(self, handle: SpendHandle, actual: int) -> None:
         if type(actual) is not int or actual < 0:
-            raise Reject(Code.INTERNAL, "actual must be a non-negative int")
+            raise Reject(
+                Code.INTERNAL,
+                "actual must be a non-negative int",
+            )
         ordered = _check_path(handle.path)
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
             cur.execute(
                 "SELECT remaining FROM budget_chains WHERE cid = %s FOR UPDATE",
-                (handle.cid,))
+                (handle.cid,),
+            )
             chain = cur.fetchone()
             if chain is None:
-                raise Reject(Code.INTERNAL, "settle: chain lost")
+                raise Reject(
+                    Code.INTERNAL,
+                    "settle: chain lost",
+                )
             cur.execute(
                 """SELECT amount, state FROM budget_reservations
-                   WHERE handle = %s FOR UPDATE""", (handle.handle,))
+                   WHERE handle = %s FOR UPDATE""",
+                (handle.handle,),
+            )
             row = cur.fetchone()
             if row is None:
-                raise Reject(Code.INTERNAL, "settle: handle lost")
+                raise Reject(
+                    Code.INTERNAL,
+                    "settle: handle lost",
+                )
             reserved, state = row
             if state != ReservationState.DISPATCHED:
-                raise Reject(Code.INTERNAL, f"settle from {state}")
+                raise Reject(
+                    Code.INTERNAL,
+                    f"settle from {state}",
+                )
             delta = actual - int(reserved)
             hops = []
             for jti, _ in ordered:
                 cur.execute(
                     """SELECT cap, spent FROM budget_hops
                        WHERE cid = %s AND jti = %s FOR UPDATE""",
-                    (handle.cid, jti))
+                    (handle.cid, jti),
+                )
                 hops.append(cur.fetchone())
             if delta != 0:
                 if int(chain[0]) - delta < 0:
-                    raise Reject(Code.BUDGET_EXHAUSTED, "root on settle")
-                for jti, (cap, spent) in zip((j for j, _ in ordered), hops):
+                    raise Reject(
+                        Code.BUDGET_EXHAUSTED,
+                        "root on settle",
+                    )
+                for jti, (cap, spent) in zip(
+                    (j for j, _ in ordered),
+                    hops,
+                    strict=False,
+                ):
                     nxt = int(spent) + delta
                     if nxt < 0 or nxt > int(cap):
-                        raise Reject(Code.BUDGET_EXHAUSTED,
-                                     f"hop {jti} on settle")
+                        raise Reject(
+                            Code.BUDGET_EXHAUSTED,
+                            f"hop {jti} on settle",
+                        )
                 cur.execute(
                     "UPDATE budget_chains SET remaining = remaining - %s WHERE cid = %s",
-                    (delta, handle.cid))
+                    (delta, handle.cid),
+                )
                 for jti, _ in ordered:
                     cur.execute(
                         """UPDATE budget_hops SET spent = spent + %s
                            WHERE cid = %s AND jti = %s""",
-                        (delta, handle.cid, jti))
+                        (delta, handle.cid, jti),
+                    )
             cur.execute(
                 """UPDATE budget_reservations SET amount = %s, state = 'settled'
-                   WHERE handle = %s""", (actual, handle.handle))
-            handle.amount = actual                              # ← ADD
-            handle.state = ReservationState.SETTLED             # ← ADD
-            
-    
+                   WHERE handle = %s""",
+                (actual, handle.handle),
+            )
+            handle.amount = actual  # ← ADD
+            handle.state = ReservationState.SETTLED  # ← ADD
+
     def commit(self, handle: SpendHandle) -> None:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
-            cur.execute("DELETE FROM budget_reservations WHERE handle = %s",
-                        (handle.handle,))
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
+            cur.execute(
+                "DELETE FROM budget_reservations WHERE handle = %s",
+                (handle.handle,),
+            )
 
     def refund(self, handle: SpendHandle) -> None:
         ordered = _check_path(handle.path)
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
             cur.execute(
                 "SELECT remaining FROM budget_chains WHERE cid = %s FOR UPDATE",
-                (handle.cid,))
+                (handle.cid,),
+            )
             for jti, _ in ordered:
                 cur.execute(
                     """SELECT spent FROM budget_hops
                        WHERE cid = %s AND jti = %s FOR UPDATE""",
-                    (handle.cid, jti))
+                    (handle.cid, jti),
+                )
             cur.execute(
                 """DELETE FROM budget_reservations
                    WHERE handle = %s AND state = 'reserved' RETURNING amount""",
-                (handle.handle,))
+                (handle.handle,),
+            )
             row = cur.fetchone()
             if row is None:
                 return
-            handle.state = ReservationState.CANCELLED           
+            handle.state = ReservationState.CANCELLED
             amount = int(row[0])
             cur.execute(
                 "UPDATE budget_chains SET remaining = remaining + %s WHERE cid = %s",
-                (amount, handle.cid))
+                (amount, handle.cid),
+            )
 
             for jti, _ in ordered:
                 cur.execute(
                     """UPDATE budget_hops SET spent = GREATEST(0, spent - %s)
                        WHERE cid = %s AND jti = %s""",
-                    (amount, handle.cid, jti))
+                    (amount, handle.cid, jti),
+                )
 
     def refund_abandoned(self, older_than_seconds: int) -> int:
         """Refund RESERVED rows older than this. The cutoff must be longer
@@ -1489,28 +1847,48 @@ class PostgresBudgetLedger(_Pg):
         succeeds is no longer holding its budget."""
         if older_than_seconds <= 0:
             raise ValueError("older_than_seconds must be > 0")
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute(
                 """SELECT handle, cid, amount, path_json FROM budget_reservations
                    WHERE state = 'reserved'
                      AND created_at < now() - make_interval(secs => %s)""",
-                (older_than_seconds,))
+                (older_than_seconds,),
+            )
             rows = cur.fetchall()
         n = 0
-        for handle, cid, amount, path_json in rows:
-            self.refund(SpendHandle(
-                cid=cid, amount=int(amount), handle=handle,
-                path=_load_path(path_json)))
+        for (
+            handle,
+            cid,
+            amount,
+            path_json,
+        ) in rows:
+            self.refund(
+                SpendHandle(
+                    cid=cid,
+                    amount=int(amount),
+                    handle=handle,
+                    path=_load_path(path_json),
+                )
+            )
             n += 1
         return n
 
 
 class PostgresRevocationStore(_Pg):
     def _add(self, kind: str, value: str) -> None:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             cur.execute(
                 """INSERT INTO revocations (kind, value) VALUES (%s, %s)
-                   ON CONFLICT DO NOTHING""", (kind, value))
+                   ON CONFLICT DO NOTHING""",
+                (kind, value),
+            )
 
     def revoke_agent(self, value: str) -> None:
         self._add("agent", value)
@@ -1524,14 +1902,26 @@ class PostgresRevocationStore(_Pg):
     def revoke_token(self, value: str) -> None:
         self._add("jti", value)
 
-    def find_revoked(self, *, agents: tuple[str, ...] = (),
-                     kids: tuple[str, ...] = (), cids: tuple[str, ...] = (),
-                     jtis: tuple[str, ...] = ()) -> Optional[tuple[str, str]]:
-        groups = (("agent", agents), ("kid", kids),
-                  ("cid", cids), ("jti", jtis))
+    def find_revoked(
+        self,
+        *,
+        agents: tuple[str, ...] = (),
+        kids: tuple[str, ...] = (),
+        cids: tuple[str, ...] = (),
+        jtis: tuple[str, ...] = (),
+    ) -> tuple[str, str] | None:
+        groups = (
+            ("agent", agents),
+            ("kid", kids),
+            ("cid", cids),
+            ("jti", jtis),
+        )
         if not any(items for _, items in groups):
             return None
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute(
                 """
                 SELECT kind, value FROM revocations
@@ -1540,7 +1930,13 @@ class PostgresRevocationStore(_Pg):
                    OR (kind = 'cid' AND value = ANY(%s))
                    OR (kind = 'jti' AND value = ANY(%s))
                 """,
-                (list(agents), list(kids), list(cids), list(jtis)))
+                (
+                    list(agents),
+                    list(kids),
+                    list(cids),
+                    list(jtis),
+                ),
+            )
             found = {(kind, value) for kind, value in cur.fetchall()}
         for kind, items in groups:
             for item in items:
@@ -1551,24 +1947,40 @@ class PostgresRevocationStore(_Pg):
 
 class PostgresEvidenceLog(_Pg):
     def append(self, draft: dict) -> Evidence:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
-            cur.execute(
-                "SELECT head FROM evidence_head WHERE id = 1 FOR UPDATE")
+            cur.execute("SELECT head FROM evidence_head WHERE id = 1 FOR UPDATE")
             row = cur.fetchone()
             if row is None:
-                raise Reject(Code.STATE_UNAVAILABLE, "evidence head missing")
+                raise Reject(
+                    Code.STATE_UNAVAILABLE,
+                    "evidence head missing",
+                )
             ev = _evidence(draft, row[0])
             cur.execute(
                 """INSERT INTO evidence (prev_hash, digest, body)
                    VALUES (%s, %s, %s)""",
-                (ev.prev_hash, ev.digest(), _dump_evidence(ev)))
-            cur.execute("UPDATE evidence_head SET head = %s WHERE id = 1",
-                        (ev.digest(),))
+                (
+                    ev.prev_hash,
+                    ev.digest(),
+                    _dump_evidence(ev),
+                ),
+            )
+            cur.execute(
+                "UPDATE evidence_head SET head = %s WHERE id = 1",
+                (ev.digest(),),
+            )
             return ev
 
     def verify_integrity(self) -> bool:
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute("SELECT head FROM evidence_head WHERE id = 1")
             head = cur.fetchone()
             cur.execute("SELECT body, digest FROM evidence ORDER BY seq")
@@ -1582,13 +1994,21 @@ class PostgresEvidenceLog(_Pg):
         return head is not None and prev == head[0]
 
     def records(self) -> tuple[Evidence, ...]:
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute("SELECT body FROM evidence ORDER BY seq")
             return tuple(_load_evidence(row[0]) for row in cur.fetchall())
 
 
 class PostgresEnrollments(_Pg):
-    def __init__(self, pool: object, ttl_seconds: int, max_per_peer: int) -> None:
+    def __init__(
+        self,
+        pool: object,
+        ttl_seconds: int,
+        max_per_peer: int,
+    ) -> None:
         super().__init__(pool)
         if ttl_seconds <= 0 or max_per_peer <= 0:
             raise ValueError("ttl_seconds and max_per_peer must be > 0")
@@ -1596,54 +2016,92 @@ class PostgresEnrollments(_Pg):
         self._max = max_per_peer
 
     def add(self, peer_id: str, cnf: str, now: int) -> None:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             self._timeout(cur)
             cur.execute(
-                "SELECT pg_advisory_xact_lock(hashtext(%s))", (peer_id,))
+                "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                (peer_id,),
+            )
             cur.execute(
                 "DELETE FROM enrollments WHERE peer_id = %s AND expires_at <= %s",
-                (peer_id, now))
+                (peer_id, now),
+            )
             cur.execute(
                 """INSERT INTO enrollments (peer_id, cnf, expires_at, enrolled_at)
                    VALUES (%s, %s, %s, %s)
                    ON CONFLICT (peer_id, cnf) DO UPDATE
                    SET expires_at = EXCLUDED.expires_at,
                        enrolled_at = EXCLUDED.enrolled_at""",
-                (peer_id, cnf, now + self._ttl, now))
+                (
+                    peer_id,
+                    cnf,
+                    now + self._ttl,
+                    now,
+                ),
+            )
             cur.execute(
                 """DELETE FROM enrollments WHERE peer_id = %s AND cnf NOT IN (
                        SELECT cnf FROM enrollments WHERE peer_id = %s
                        ORDER BY enrolled_at DESC LIMIT %s)""",
-                (peer_id, peer_id, self._max))
+                (peer_id, peer_id, self._max),
+            )
 
     def require(self, peer_id: str, cnf: str, now: int) -> None:
-        with self._conn() as conn, conn.cursor() as cur:
+        with (
+            self._conn() as conn,
+            conn.cursor() as cur,
+        ):
             cur.execute(
                 """SELECT expires_at FROM enrollments
-                   WHERE peer_id = %s AND cnf = %s""", (peer_id, cnf))
+                   WHERE peer_id = %s AND cnf = %s""",
+                (peer_id, cnf),
+            )
             row = cur.fetchone()
         if row is None or int(row[0]) <= now:
-            raise Reject(Code.NOT_ENROLLED,
-                         "key not enrolled for this SPIFFE ID")
+            raise Reject(
+                Code.NOT_ENROLLED,
+                "key not enrolled for this SPIFFE ID",
+            )
 
-    def revoke(self, peer_id: str, cnf: Optional[str] = None) -> None:
-        with self._conn() as conn, conn.transaction(), conn.cursor() as cur:
+    def revoke(self, peer_id: str, cnf: str | None = None) -> None:
+        with (
+            self._conn() as conn,
+            conn.transaction(),
+            conn.cursor() as cur,
+        ):
             if cnf is None:
                 cur.execute(
-                    "DELETE FROM enrollments WHERE peer_id = %s", (peer_id,))
+                    "DELETE FROM enrollments WHERE peer_id = %s",
+                    (peer_id,),
+                )
             else:
                 cur.execute(
                     "DELETE FROM enrollments WHERE peer_id = %s AND cnf = %s",
-                    (peer_id, cnf))
+                    (peer_id, cnf),
+                )
 
 
 def _draft(action_id: str = "a1") -> dict:
     return {
-        "action_id": action_id, "code": Code.OK, "cid": "c", "jtis": ("j",),
-        "peer_id": "spiffe://t/a", "issuer": "spiffe://t/m",
-        "holder": "spiffe://t/a", "action": "infer", "resource": "llm",
-        "payload_hash": "sha256:" + "ab" * 32, "cost_micros": 1, "ts": 1,
-        "pop_thumbprint": "", "channel_bound": False, "verifier": "spiffe://t/g",
+        "action_id": action_id,
+        "code": Code.OK,
+        "cid": "c",
+        "jtis": ("j",),
+        "peer_id": "spiffe://t/a",
+        "issuer": "spiffe://t/m",
+        "holder": "spiffe://t/a",
+        "action": "infer",
+        "resource": "llm",
+        "payload_hash": "sha256:" + "ab" * 32,
+        "cost_micros": 1,
+        "ts": 1,
+        "pop_thumbprint": "",
+        "channel_bound": False,
+        "verifier": "spiffe://t/g",
         "related_id": "",
     }
 
@@ -1704,8 +2162,12 @@ def selftest() -> int:
     if url:
         prefix = f"capchain:test:{uuid.uuid4().hex}"
         try:
-            with Stores.open("redis", redis_url=url, prefix=prefix,
-                             env="development") as stores:
+            with Stores.open(
+                "redis",
+                redis_url=url,
+                prefix=prefix,
+                env="development",
+            ) as stores:
                 check_contract(stores)
             print("  [ok]   redis")
         except Exception as e:
@@ -1716,8 +2178,12 @@ def selftest() -> int:
         schema = "capchain_test_" + uuid.uuid4().hex[:12]
         try:
             migrate(dsn, schema)
-            with Stores.open("database", postgres_dsn=dsn, schema=schema,
-                             env="development") as stores:
+            with Stores.open(
+                "database",
+                postgres_dsn=dsn,
+                schema=schema,
+                env="development",
+            ) as stores:
                 check_contract(stores)
             print("  [ok]   database")
         except Exception as e:

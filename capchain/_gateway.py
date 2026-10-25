@@ -1,26 +1,36 @@
 """Verifier role: authorize one request against a capability chain."""
+
 from __future__ import annotations
 
+import contextlib
+import logging
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+)
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Iterator, Optional, TypeVar
-from typing import Callable, Iterator, Optional, Protocol
-import logging
+from typing import TypeVar
 
 from ._canonical import sha256_tag
 from ._chain import Verdict, verify_chain
-from ._errors import Code, Reject
+from ._constants import (
+    MAX_SESSION_ID_CHARS,
+    MAX_TASK_CHARS,
+)
+from ._errors import Code
+from ._errors import RejectError as Reject
 from ._evidence import Evidence
 from ._keys import TrustedRoots
 from ._proofs import verify_proof_of_possession
 from ._scope import MODELS, Model, Scope
 from ._storage import (
     BudgetLedger,
+    EvidenceStore,
     InMemoryBudgetLedger,
-    EvidenceStore, 
     InMemoryEvidenceLog,
     InMemoryReplayStore,
     InMemoryRevocationStore,
@@ -31,17 +41,11 @@ from ._storage import (
 )
 from ._tls import TlsAdapter
 from ._wire import Signed, bounded_str, is_int
-from ._constants import (
-    MAX_SESSION_ID_CHARS,
-    MAX_TASK_CHARS,
-    
-)
-
 
 log = logging.getLogger(__name__)
 
 
-def _now(clock: Callable[[], int], override: Optional[int]) -> int:
+def _now(clock: Callable[[], int], override: int | None) -> int:
     if override is None:
         return clock()
     if type(override) is not int or override < 0:
@@ -67,8 +71,7 @@ class Policy:
         for edge in self.edges:
             pair = tuple(edge)
             if len(pair) != 2 or any(not isinstance(p, str) or not p for p in pair):
-                raise ValueError(
-                    "each edge must be a pair of non-empty strings")
+                raise ValueError("each edge must be a pair of non-empty strings")
             normalized.add((pair[0], pair[1]))
         object.__setattr__(self, "edges", frozenset(normalized))
 
@@ -122,7 +125,7 @@ class Call:
         # Normalize to bytes: the field claims bytes, and frozen=True
         # does not prevent mutation of a bytearray in place.
         object.__setattr__(self, "body", bytes(self.body))
-        
+
     @property
     def tool(self) -> str:
         return f"{self.resource}:{self.action}"
@@ -143,8 +146,15 @@ class Permit:
     still reserved or `cancel()` is called.
     """
 
-    __slots__ = ("_verdict", "_spend", "_ledger",
-                 "_evidence", "_clock", "_record", "_cost")
+    __slots__ = (
+        "_clock",
+        "_cost",
+        "_evidence",
+        "_ledger",
+        "_record",
+        "_spend",
+        "_verdict",
+    )
 
     def __init__(
         self,
@@ -197,7 +207,10 @@ class Permit:
 
     def cancel(self) -> None:
         if self._spend.state != ReservationState.RESERVED:
-            raise Reject(Code.INTERNAL, f"cancel from {self._spend.state}")
+            raise Reject(
+                Code.INTERNAL,
+                f"cancel from {self._spend.state}",
+            )
         self._ledger.refund(self._spend)
 
     def settle(self, actual_micros: int) -> None:
@@ -231,7 +244,9 @@ class Permit:
             )
         if not is_int(actual_micros) or actual_micros < 0:
             raise Reject(
-                Code.INTERNAL, "actual_micros must be a non-negative int")
+                Code.INTERNAL,
+                "actual_micros must be a non-negative int",
+            )
 
         try:
             self._evidence.append(
@@ -307,16 +322,15 @@ class Gateway:
         policy: Policy,
         tls: TlsAdapter,
         allowed_models: Iterable[str] = MODELS,
-        ledger: Optional[BudgetLedger] = None,
-        replay: Optional[ReplayStore] = None,
-        revocation: Optional[RevocationStore] = None,
-        evidence: Optional[EvidenceStore] = None,
+        ledger: BudgetLedger | None = None,
+        replay: ReplayStore | None = None,
+        revocation: RevocationStore | None = None,
+        evidence: EvidenceStore | None = None,
         pop_max_skew: int = 30,
-        chain_max_skew: Optional[int] = None,
+        chain_max_skew: int | None = None,
         domain_required_tools: Iterable[str] = (),
         clock: Callable[[], int] = lambda: int(time.time()),
-        cost_model: Optional[CostModel] = None,
-
+        cost_model: CostModel | None = None,
     ) -> None:
         if not isinstance(roots, TrustedRoots):
             raise TypeError("roots must be a TrustedRoots")
@@ -329,11 +343,9 @@ class Gateway:
         if type(pop_max_skew) is not int or pop_max_skew < 0:
             raise ValueError("pop_max_skew must be a non-negative int")
         if isinstance(allowed_models, (str, bytes)):
-            raise ValueError(
-                "allowed_models must be an iterable, not a string")
+            raise ValueError("allowed_models must be an iterable, not a string")
         if isinstance(domain_required_tools, (str, bytes)):
-            raise ValueError(
-                "domain_required_tools must be an iterable, not a string")
+            raise ValueError("domain_required_tools must be an iterable, not a string")
 
         self.agent_id = agent_id
         self._roots = roots
@@ -352,9 +364,7 @@ class Gateway:
             if replay is not None
             else InMemoryReplayStore(ttl_seconds=max(300, 2 * pop_max_skew + 1))
         )
-        self._revocation = (
-            revocation if revocation is not None else InMemoryRevocationStore()
-        )
+        self._revocation = revocation if revocation is not None else InMemoryRevocationStore()
         self._evidence = evidence if evidence is not None else InMemoryEvidenceLog()
 
         if self._replay.ttl_seconds <= 2 * pop_max_skew:
@@ -376,8 +386,8 @@ class Gateway:
         token: bytes,
         call: Call,
         context: ServerContext,
-        proof: Optional[bytes] = None,
-        cost_model: Optional[CostModel] = None,
+        proof: bytes | None = None,
+        cost_model: CostModel | None = None,
     ) -> Iterator[Permit]:
         """Authorize one call, reserving budget for its duration.
 
@@ -410,8 +420,7 @@ class Gateway:
                 # admission when evidence fails, because admission hasn't happened
                 # until evidence exists.)
                 log.exception(
-                    "evidence store failed while recording denial %s; "
-                    "the denial itself stands",
+                    "evidence store failed while recording denial %s; the denial itself stands",
                     exc.code,
                 )
             raise
@@ -421,8 +430,7 @@ class Gateway:
                 self._record_denial(rejection, peer_id, call, now)
             except Exception:
                 log.exception(
-                    "evidence store failed while recording denial %s; "
-                    "the denial itself stands",
+                    "evidence store failed while recording denial %s; the denial itself stands",
                     rejection.code,
                 )
             raise rejection from exc
@@ -449,7 +457,8 @@ class Gateway:
                     self._ledger.commit(spend)
                 except Exception as exc:
                     raise Reject(
-                        Code.STATE_UNAVAILABLE, f"commit: {type(exc).__name__}"
+                        Code.STATE_UNAVAILABLE,
+                        f"commit: {type(exc).__name__}",
                     ) from exc
             raise
         else:
@@ -474,7 +483,8 @@ class Gateway:
                 self._ledger.commit(spend)
             except Exception as exc:
                 raise Reject(
-                    Code.STATE_UNAVAILABLE, f"commit: {type(exc).__name__}"
+                    Code.STATE_UNAVAILABLE,
+                    f"commit: {type(exc).__name__}",
                 ) from exc
 
             if spend.state == ReservationState.DISPATCHED:
@@ -490,28 +500,44 @@ class Gateway:
         tls_socket: object,
         peer_id: str,
         token: bytes,
-        proof: Optional[bytes],
+        proof: bytes | None,
         call: Call,
         context: ServerContext,
-        cost_model: Optional[CostModel],
+        cost_model: CostModel | None,
         now: int,
     ) -> Permit:
         if not isinstance(call, Call):
-            raise Reject(Code.INTERNAL, "call must be a Call")
+            raise Reject(
+                Code.INTERNAL,
+                "call must be a Call",
+            )
         if not isinstance(context, ServerContext):
-            raise Reject(Code.INTERNAL, "context must be a ServerContext")
+            raise Reject(
+                Code.INTERNAL,
+                "context must be a ServerContext",
+            )
 
         # 1. Cryptographic chain.
         verdict = verify_chain(
-            token, roots=self._roots, now=now, max_depth=self._policy.max_depth, skew=self._chain_skew
+            token,
+            roots=self._roots,
+            now=now,
+            max_depth=self._policy.max_depth,
+            skew=self._chain_skew,
         )
         if verdict.model not in self._allowed_models:
-            raise Reject(Code.POLICY_DENIED, f"model {verdict.model!r}")
+            raise Reject(
+                Code.POLICY_DENIED,
+                f"model {verdict.model!r}",
+            )
 
         key_bound = verdict.model == Model.KEY_BOUND
         if key_bound:
             if proof is None:
-                raise Reject(Code.POP_REQUIRED, "proof of possession required")
+                raise Reject(
+                    Code.POP_REQUIRED,
+                    "proof of possession required",
+                )
             binding = self._tls.channel_binding(tls_socket)
             nonce = verify_proof_of_possession(
                 Signed.decode(proof),
@@ -527,78 +553,130 @@ class Gateway:
             )
             try:
                 fresh = self._replay.consume(
-                    ("pop-v2", self.agent_id, verdict.cnf, nonce), now
+                    (
+                        "pop-v2",
+                        self.agent_id,
+                        verdict.cnf,
+                        nonce,
+                    ),
+                    now,
                 )
             except Exception as exc:
                 raise Reject(
-                    Code.STATE_UNAVAILABLE, f"replay store: {type(exc).__name__}"
+                    Code.STATE_UNAVAILABLE,
+                    f"replay store: {type(exc).__name__}",
                 ) from exc
             if not fresh:
-                raise Reject(Code.REPLAY, "nonce already used")
+                raise Reject(
+                    Code.REPLAY,
+                    "nonce already used",
+                )
         elif proof is not None:
-            raise Reject(Code.MODEL_MISMATCH,
-                         "proof supplied for peer-bound token")
+            raise Reject(
+                Code.MODEL_MISMATCH,
+                "proof supplied for peer-bound token",
+            )
 
         # 2. Presenter, audience, delegation policy.
         if peer_id != verdict.holder:
             raise Reject(
-                Code.WRONG_HOLDER, f"peer {peer_id} != holder {verdict.holder}"
+                Code.WRONG_HOLDER,
+                f"peer {peer_id} != holder {verdict.holder}",
             )
         if not verdict.scope.allows_verifier(self.agent_id):
             raise Reject(Code.WRONG_AUDIENCE, self.agent_id)
         if not self._policy.allows_root(verdict.issuer):
-            raise Reject(Code.POLICY_DENIED, f"issuer {verdict.issuer}")
-        for source, target in zip(verdict.path, verdict.path[1:]):
+            raise Reject(
+                Code.POLICY_DENIED,
+                f"issuer {verdict.issuer}",
+            )
+        for source, target in zip(
+            verdict.path,
+            verdict.path[1:],
+            strict=False,
+        ):
             if not self._policy.allows_edge(source, target):
-                raise Reject(Code.POLICY_DENIED, f"edge {source} -> {target}")
+                raise Reject(
+                    Code.POLICY_DENIED,
+                    f"edge {source} -> {target}",
+                )
 
         # 3. Request against scope and server-held context.
         if not verdict.scope.allows_tool(call.tool):
             raise Reject(Code.SCOPE_MISMATCH, call.tool)
         if context.domain:
             if not verdict.scope.allows_domain(context.domain):
-                raise Reject(Code.SCOPE_MISMATCH, f"domain {context.domain}")
+                raise Reject(
+                    Code.SCOPE_MISMATCH,
+                    f"domain {context.domain}",
+                )
         elif call.tool in self._domain_required:
-            raise Reject(Code.SCOPE_MISMATCH, f"{call.tool} requires a domain")
+            raise Reject(
+                Code.SCOPE_MISMATCH,
+                f"{call.tool} requires a domain",
+            )
         if verdict.session_id != context.session_id:
-            raise Reject(Code.WRONG_SESSION, "token session != server session")
+            raise Reject(
+                Code.WRONG_SESSION,
+                "token session != server session",
+            )
         if verdict.task != context.task:
-            raise Reject(Code.WRONG_TASK, "token task != server task")
+            raise Reject(
+                Code.WRONG_TASK,
+                "token task != server task",
+            )
 
         # 4. Cost model. Runs only after every pure identity/policy/scope
         #    check has passed, so an unauthenticated presenter cannot
         #    drive a pricing service or DB lookup.
         model = cost_model if cost_model is not None else self._cost_model
         if model is None:
-            raise Reject(Code.INTERNAL, "no cost model configured")
+            raise Reject(
+                Code.INTERNAL,
+                "no cost model configured",
+            )
         try:
             reserve_micros = model(call, context, verdict)
         except Reject:
             raise
         except Exception as exc:
             raise Reject(
-                Code.INTERNAL, f"cost model: {type(exc).__name__}") from exc
+                Code.INTERNAL,
+                f"cost model: {type(exc).__name__}",
+            ) from exc
         if not is_int(reserve_micros) or reserve_micros < 0:
             raise Reject(
-                Code.INTERNAL, f"cost model returned {reserve_micros!r}")
+                Code.INTERNAL,
+                f"cost model returned {reserve_micros!r}",
+            )
 
         # 5. Revocation and budget.
         if reserve_micros > verdict.scope.budget_micros:
-            raise Reject(Code.BUDGET_EXHAUSTED, f"{reserve_micros} > leaf cap")
+            raise Reject(
+                Code.BUDGET_EXHAUSTED,
+                f"{reserve_micros} > leaf cap",
+            )
 
         try:
             revoked = self._revocation.find_revoked(
                 agents=verdict.path,
-                kids=verdict.kids + (verdict.cnf,),
+                kids=(
+                    *verdict.kids,
+                    verdict.cnf,
+                ),
                 cids=(verdict.cid,),
                 jtis=verdict.jtis,
             )
         except Exception as exc:
             raise Reject(
-                Code.STATE_UNAVAILABLE, f"revocation store: {type(exc).__name__}"
+                Code.STATE_UNAVAILABLE,
+                f"revocation store: {type(exc).__name__}",
             ) from exc
         if revoked:
-            raise Reject(Code.REVOKED, f"{revoked[0]}={revoked[1]}")
+            raise Reject(
+                Code.REVOKED,
+                f"{revoked[0]}={revoked[1]}",
+            )
 
         try:
             spend = self._ledger.reserve(
@@ -612,10 +690,15 @@ class Gateway:
         except Reject:
             raise
         except Exception as exc:
-            raise Reject(Code.STATE_UNAVAILABLE,
-                         f"ledger: {type(exc).__name__}") from exc
+            raise Reject(
+                Code.STATE_UNAVAILABLE,
+                f"ledger: {type(exc).__name__}",
+            ) from exc
         if spend is None:
-            raise Reject(Code.BUDGET_EXHAUSTED, f"chain {verdict.cid}")
+            raise Reject(
+                Code.BUDGET_EXHAUSTED,
+                f"chain {verdict.cid}",
+            )
 
         # 6. Admission evidence.
         try:
@@ -639,12 +722,14 @@ class Gateway:
                     "related_id": "",
                 }
             )
+
         except Exception as exc:
-            try:
+            with contextlib.suppress(Exception):
                 self._ledger.refund(spend)
-            except Exception:
-                pass  # reservation stuck; reconcile from the missing evidence row
-            raise Reject(Code.EVIDENCE_BROKEN, type(exc).__name__) from exc
+            raise Reject(
+                Code.EVIDENCE_BROKEN,
+                type(exc).__name__,
+            ) from exc
 
         return Permit(
             verdict=verdict,
@@ -656,7 +741,11 @@ class Gateway:
         )
 
     def _record_denial(
-        self, rejection: Reject, peer_id: str, call: object, now: int
+        self,
+        rejection: Reject,
+        peer_id: str,
+        call: object,
+        now: int,
     ) -> None:
         resource = getattr(call, "resource", "")
         action = getattr(call, "action", "")
@@ -690,18 +779,39 @@ class Gateway:
                 f"deny {rejection.code} not recorded: {type(exc).__name__}",
             ) from rejection
 
-    def verify(self, *, token: bytes, now: Optional[int] = None) -> Verdict:
+    def verify(
+        self,
+        *,
+        token: bytes,
+        now: int | None = None,
+    ) -> Verdict:
         """Verify the chain and return the verdict. No state, no PoP, no budget."""
         timestamp = _now(self._clock, now)
         verdict = verify_chain(
-            token, roots=self._roots, now=timestamp,
-            max_depth=self._policy.max_depth, skew=self._chain_skew
+            token,
+            roots=self._roots,
+            now=timestamp,
+            max_depth=self._policy.max_depth,
+            skew=self._chain_skew,
         )
         if verdict.model not in self._allowed_models:
-            raise Reject(Code.POLICY_DENIED, f"model {verdict.model!r}")
+            raise Reject(
+                Code.POLICY_DENIED,
+                f"model {verdict.model!r}",
+            )
         if not self._policy.allows_root(verdict.issuer):
-            raise Reject(Code.POLICY_DENIED, f"issuer {verdict.issuer}")
-        for source, target in zip(verdict.path, verdict.path[1:]):
+            raise Reject(
+                Code.POLICY_DENIED,
+                f"issuer {verdict.issuer}",
+            )
+        for source, target in zip(
+            verdict.path,
+            verdict.path[1:],
+            strict=False,
+        ):
             if not self._policy.allows_edge(source, target):
-                raise Reject(Code.POLICY_DENIED, f"edge {source} -> {target}")
+                raise Reject(
+                    Code.POLICY_DENIED,
+                    f"edge {source} -> {target}",
+                )
         return verdict

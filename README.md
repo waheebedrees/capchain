@@ -440,10 +440,10 @@ ledger.
 `RevocationStore.find_revoked` is consulted with:
 
 ```python
-agents=verdict.path,           # every workload on the path
-kids=verdict.kids + (verdict.cnf,),  # every signing key
-cids=(verdict.cid,),           # the chain
-jtis=verdict.jtis,             # every block
+agents = (verdict.path,)  # every workload on the path
+kids = (verdict.kids + (verdict.cnf,),)  # every signing key
+cids = ((verdict.cid,),)  # the chain
+jtis = (verdict.jtis,)  # every block
 ```
 
 Effective revocation levels:
@@ -561,8 +561,10 @@ Channel-Binding", 32, None)` — Python 3.12+.
 class AsyncioTlsAdapter:
     def __init__(self, *, trust_domains):
         self._inner = MutualTlsAdapter(trust_domains=trust_domains)
+
     def peer_id(self, writer):
         return self._inner.peer_id(writer.get_extra_info("socket"))
+
     def channel_binding(self, writer):
         return self._inner.channel_binding(writer.get_extra_info("socket"))
 ```
@@ -737,7 +739,11 @@ out of band against evidence.
 ```python
 verdict = gateway.verify(token=token)
 # Side-effect free: no PoP consumed, no budget reserved, no evidence written.
-print(verdict.path, verdict.scope, verdict.budget_path)
+print(
+    verdict.path,
+    verdict.scope,
+    verdict.budget_path,
+)
 ```
 
 For CLI tools, pre-flight checks, and admin views.
@@ -1040,8 +1046,8 @@ import time
 import capchain as cc
 from capchain import Stores
 
-ISSUER  = "spiffe://example.org/issuer"
-WORKER  = "spiffe://example.org/worker"
+ISSUER = "spiffe://example.org/issuer"
+WORKER = "spiffe://example.org/worker"
 GATEWAY = "spiffe://example.org/gateway"
 
 # Application-supplied TLS sockets (ssl.SSLSocket in CERT_REQUIRED mode).
@@ -1054,9 +1060,11 @@ tls = cc.MutualTlsAdapter(trust_domains=frozenset({"example.org"}))
 issuer_key = cc.WorkloadKey.generate(agent_id=ISSUER)
 worker_key = cc.WorkloadKey.generate(agent_id=WORKER)
 
-with Stores.open("memory") as stores:      # "database" or "redis" in prod
+with Stores.open("memory") as stores:  # "database" or "redis" in prod
     issuer = cc.TokenIssuer(
-        agent_id=ISSUER, root_key=issuer_key, tls=tls,
+        agent_id=ISSUER,
+        root_key=issuer_key,
+        tls=tls,
         **stores.as_issuer_kwargs(),
     )
     gateway = cc.Gateway(
@@ -1093,8 +1101,11 @@ with Stores.open("memory") as stores:      # "database" or "redis" in prod
 
     body = b'{"prompt":"..."}'
     proof = worker_key.proof_of_possession(
-        token=token, verifier_id=GATEWAY,
-        resource="llm", action="infer", body=body,
+        token=token,
+        verifier_id=GATEWAY,
+        resource="llm",
+        action="infer",
+        body=body,
         channel_binding=tls.channel_binding(workload_tls_socket),
         now=int(time.time()),
     )
@@ -1103,8 +1114,15 @@ with Stores.open("memory") as stores:      # "database" or "redis" in prod
         tls_socket=gateway_tls_socket,
         token=token,
         proof=proof,
-        call=cc.Call(resource="llm", action="infer", body=body),
-        context=cc.ServerContext(session_id="session-123", task="summarize"),
+        call=cc.Call(
+            resource="llm",
+            action="infer",
+            body=body,
+        ),
+        context=cc.ServerContext(
+            session_id="session-123",
+            task="summarize",
+        ),
     ) as permit:
         result = permit.execute(
             lambda: invoke_tool(body),
