@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# demo / dev material — NEVER commit these
+demo-state/
+*.pem
+*.key
+*.seed
+*.pub
+.env
+.env.*
+capchain-data/
+app-ledger.jsonl
