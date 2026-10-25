@@ -44,13 +44,9 @@ import re
 import os
 import logging
 import hashlib
-import redis.exceptions
-import redis
-
 import threading
 import uuid
 from dataclasses import dataclass
-
 
 import json
 
