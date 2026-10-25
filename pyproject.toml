@@ -1,0 +1,63 @@
+[project]
+name = "capchain"
+version = "0.1.0"
+description = "Ed25519-signed capability chains for agentic AI: scoped delegation, per-agent budgets, PoP, and tamper-evident audit."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+
+authors = [{ name = "Waheeb Edrees" }]
+keywords = ["agentic-ai", "authorization", "capability-tokens", "ed25519"]
+
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1", "psycopg-pool>=3.2"]
+redis = ["redis>=5"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.5", "mypy>=1.10"]
+
+[project.urls]
+Homepage = "https://github.com/waheebedrees/capchain"
+Repository = "https://github.com/waheebedrees/capchain"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# Flat layout — the package lives at ./capchain/, not ./src/capchain/.
+packages = ["capchain"]
+
+[tool.setuptools.package-data]
+capchain = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# redis and psycopg lack complete stubs; don't fail on their absence.
+module = ["redis.*", "psycopg.*", "psycopg_pool.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
